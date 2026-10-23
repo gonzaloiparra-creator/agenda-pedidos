@@ -450,16 +450,17 @@ const CATEGORIAS_VARIEDAD = [
 ];
 
 const SABORES_DEFAULT = [
-  { id: 'muzzarella', nombre: 'Muzzarella', precio: 6500, categoria: 'pizza' },
-  { id: 'fugazzeta', nombre: 'Fugazzeta', precio: 7000, categoria: 'pizza' },
-  { id: 'especial', nombre: 'Especial', precio: 7800, categoria: 'pizza' },
-  { id: 'pepperoni', nombre: 'Pepperoni', precio: 7500, categoria: 'pizza' },
+  { id: 'muzzarella', nombre: 'Muzzarella', precio: 6500, costo: 0, categoria: 'pizza' },
+  { id: 'fugazzeta',  nombre: 'Fugazzeta',  precio: 7000, costo: 0, categoria: 'pizza' },
+  { id: 'especial',   nombre: 'Especial',   precio: 7800, costo: 0, categoria: 'pizza' },
+  { id: 'pepperoni',  nombre: 'Pepperoni',  precio: 7500, costo: 0, categoria: 'pizza' },
 ];
 
 const ESTADOS_COCINA = [
-  { id: 'pendiente', label: 'Pendiente', color: '#9A8F82', bg: '#3A352D', next: 'lista' },
-  { id: 'lista', label: 'Lista para entregar', color: '#E08A3C', bg: '#4A3120', next: 'entregado' },
-  { id: 'entregado', label: 'Entregado', color: '#6FAE94', bg: '#1F3A30', next: null },
+  { id: 'pendiente',  label: 'Pendiente',          color: '#9A8F82', bg: '#3A352D', next: 'lista'      },
+  { id: 'lista',      label: 'Lista para entregar', color: '#E08A3C', bg: '#4A3120', next: 'en_camino'  },
+  { id: 'en_camino',  label: 'En camino',           color: '#7EB1E0', bg: '#1C2C3D', next: 'entregado'  },
+  { id: 'entregado',  label: 'Entregado',           color: '#6FAE94', bg: '#1F3A30', next: null         },
 ];
 
 const ESTADO_COCINA_MAP = Object.fromEntries(ESTADOS_COCINA.map(e => [e.id, e]));
@@ -484,6 +485,7 @@ const TIPOS_ENTREGA = [
 
 const STORAGE_KEY = 'horno_pedidos_v1';
 const STORAGE_KEY_VARIEDADES = 'horno_variedades_v1';
+const STORAGE_KEY_CLIENTES = 'horno_clientes_v1';
 
 /* =========================================================
    UTILIDADES
@@ -610,6 +612,34 @@ function calcularTransferencia(pago, total) {
 
 function normalizarTelefono(tel) {
   return (tel || '').replace(/[^\d+]/g, '');
+}
+
+function ticketWhatsapp(pedido, variedades) {
+  const items = (pedido.items || []).map(it => {
+    const v = variedades.find(s => s.id === it.saborId);
+    return `  • ${it.cantidad}× ${v ? v.nombre : it.saborId}`;
+  }).join('\n');
+  const entrega = pedido.tipoEntrega === 'domicilio'
+    ? `📍 Envío a: ${pedido.direccion || 'a confirmar'}`
+    : `🏠 Retira en local`;
+  const hora = pedido.hora ? `🕐 Hora: ${pedido.hora}` : '';
+  const notas = pedido.notas ? `📝 Notas: ${pedido.notas}` : '';
+  const total = `💰 Total: ${formatoMoneda(pedido.total)}`;
+  const lineas = [
+    `Hola ${pedido.cliente}! 🍕`,
+    `Tu pedido de *Iparra Pizza* está confirmado:`,
+    ``,
+    items,
+    ``,
+    entrega,
+    hora,
+    notas,
+    total,
+    ``,
+    `¡Gracias! Cualquier consulta avisame 😊`,
+  ].filter(l => l !== undefined && !(l === '' && false)).join('\n');
+  const num = normalizarTelefono(pedido.telefono).replace(/^\+/, '');
+  return `https://wa.me/${num}?text=${encodeURIComponent(lineas)}`;
 }
 
 function linkWhatsapp(telefono, nombre, estado, tipoEntrega) {
@@ -757,8 +787,8 @@ function useVariedades() {
     }
   }, [variedades]);
 
-  const crearVariedad = useCallback((nombre, precio, categoria = 'pizza') => {
-    const nueva = { id: uid(), nombre: nombre.trim(), precio: Number(precio) || 0, categoria };
+  const crearVariedad = useCallback((nombre, precio, categoria = 'pizza', costo = 0) => {
+    const nueva = { id: uid(), nombre: nombre.trim(), precio: Number(precio) || 0, costo: Number(costo) || 0, categoria };
     setVariedades(prev => [...prev, nueva]);
     return nueva;
   }, []);
@@ -772,6 +802,64 @@ function useVariedades() {
   }, []);
 
   return { variedades, crearVariedad, actualizarVariedad, eliminarVariedad };
+}
+
+// Clientes frecuentes: se construye automáticamente desde los pedidos
+// Un "cliente" es nombre+teléfono únicos con stats derivadas
+function useClientes(pedidos) {
+  const clientesMap = useMemo(() => {
+    const map = {};
+    pedidos.forEach(p => {
+      const key = (p.cliente || '').trim().toLowerCase();
+      if (!key) return;
+      if (!map[key]) {
+        map[key] = {
+          id: key,
+          nombre: p.cliente.trim(),
+          telefono: p.telefono || '',
+          pedidos: [],
+          totalGastado: 0,
+          ultimoPedido: null,
+        };
+      }
+      map[key].pedidos.push(p);
+      map[key].totalGastado += Number(p.total) || 0;
+      if (!map[key].ultimoPedido || p.fecha > map[key].ultimoPedido) {
+        map[key].ultimoPedido = p.fecha;
+        map[key].telefono = p.telefono || map[key].telefono;
+        map[key].nombre = p.cliente.trim(); // conserva capitalización del último pedido
+      }
+    });
+    return map;
+  }, [pedidos]);
+
+  const clientes = useMemo(() =>
+    Object.values(clientesMap)
+      .sort((a, b) => (b.ultimoPedido || '').localeCompare(a.ultimoPedido || '')),
+    [clientesMap]
+  );
+
+  // Sugerencias de autocompletado para el formulario
+  const sugerirClientes = useCallback((texto) => {
+    if (!texto || texto.length < 2) return [];
+    const q = texto.toLowerCase();
+    return clientes
+      .filter(c => c.nombre.toLowerCase().includes(q) || c.telefono.includes(q))
+      .slice(0, 5);
+  }, [clientes]);
+
+  // Historial de un cliente específico
+  const historialCliente = useCallback((nombre) => {
+    const key = nombre.trim().toLowerCase();
+    const c = clientesMap[key];
+    if (!c) return null;
+    return {
+      ...c,
+      pedidos: c.pedidos.sort((a, b) => b.fecha.localeCompare(a.fecha)),
+    };
+  }, [clientesMap]);
+
+  return { clientes, sugerirClientes, historialCliente };
 }
 
 /* =========================================================
@@ -825,6 +913,18 @@ function Icon({ name, size = 22, ...props }) {
       return <svg {...common}><circle cx="6" cy="17" r="3"/><circle cx="18" cy="17" r="3"/><path d="M9 17h6l2-6h-3l-1.5-3H9l-1 3h3l1 3"/></svg>;
     case 'filtro':
       return <svg {...common}><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/></svg>;
+    case 'clientes':
+      return <svg {...common}><circle cx="9" cy="7" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M19 20c0-2.2-1.3-4-3-4.7"/></svg>;
+    case 'produccion':
+      return <svg {...common}><rect x="2" y="3" width="20" height="5" rx="1.5"/><rect x="2" y="10" width="20" height="5" rx="1.5"/><rect x="2" y="17" width="12" height="4" rx="1.5"/><circle cx="19" cy="19" r="2.5" fill="currentColor" stroke="none"/></svg>;
+    case 'camion':
+      return <svg {...common}><rect x="1" y="3" width="15" height="12" rx="1.5"/><path d="M16 8h4l3 5v4h-7V8z"/><circle cx="5.5" cy="18.5" r="2"/><circle cx="18.5" cy="18.5" r="2"/></svg>;
+    case 'ticket':
+      return <svg {...common}><path d="M4 4h16a1 1 0 0 1 1 1v3a2 2 0 0 0 0 4v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a2 2 0 0 0 0-4V5a1 1 0 0 1 1-1z"/><line x1="9" y1="4" x2="9" y2="20" strokeDasharray="2 3"/></svg>;
+    case 'estrella':
+      return <svg {...common}><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" fill="currentColor" stroke="none"/></svg>;
+    case 'tendencia':
+      return <svg {...common}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>;
     default:
       return null;
   }
@@ -881,9 +981,10 @@ function BotonFlotante({ onClick }) {
 
 function NavInferior({ vista, setVista }) {
   const items = [
-    { id: 'panel', label: 'Panel', icon: 'horno' },
-    { id: 'pedidos', label: 'Pedidos', icon: 'lista' },
-    { id: 'balances', label: 'Balances', icon: 'grafico' },
+    { id: 'panel',    label: 'Panel',    icon: 'horno'     },
+    { id: 'pedidos',  label: 'Pedidos',  icon: 'lista'     },
+    { id: 'clientes', label: 'Clientes', icon: 'clientes'  },
+    { id: 'balances', label: 'Balances', icon: 'grafico'   },
   ];
   return (
     <nav style={{
@@ -1263,8 +1364,65 @@ function EstadoVacio({ icono, titulo, texto }) {
    PANTALLA: PANEL PRINCIPAL (Dashboard y Cocina)
    ========================================================= */
 
+function VistaProduccion({ pedidosHoy, variedades }) {
+  // Agrupar todas las pizzas del día por sabor
+  const agrupado = useMemo(() => {
+    const map = {};
+    pedidosHoy.filter(p => p.estadoCocina !== 'entregado').forEach(p => {
+      (p.items || []).forEach(it => {
+        if (!map[it.saborId]) {
+          const v = variedades.find(s => s.id === it.saborId);
+          map[it.saborId] = { nombre: v ? v.nombre : it.saborId, categoria: v?.categoria || 'pizza', total: 0, detalle: [] };
+        }
+        map[it.saborId].total += Number(it.cantidad) || 0;
+        map[it.saborId].detalle.push({ cliente: p.cliente, cantidad: it.cantidad, hora: p.hora });
+      });
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  }, [pedidosHoy, variedades]);
+
+  const totalUnidades = agrupado.reduce((acc, r) => acc + r.total, 0);
+
+  if (totalUnidades === 0) return (
+    <EstadoVacio icono="produccion" titulo="Sin producción pendiente" texto="Todos los pedidos de hoy están entregados o no hay pedidos." />
+  );
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 17, color: 'var(--carbon)' }}>Lista de producción</h2>
+        <div className="display" style={{ fontSize: 22, color: 'var(--terracota)' }}>{totalUnidades} u.</div>
+      </div>
+      <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, overflow: 'hidden' }}>
+        {agrupado.map((item, idx) => (
+          <div key={item.nombre} style={{ borderTop: idx === 0 ? 'none' : '1px solid var(--masa-2)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 16px 8px' }}>
+              <div style={{ fontWeight: 800, fontSize: 16, color: 'var(--carbon)' }}>{item.nombre}</div>
+              <div style={{
+                background: 'var(--terracota)', color: '#fff', borderRadius: 999,
+                padding: '4px 12px', fontSize: 15, fontWeight: 800,
+              }}>{item.total}</div>
+            </div>
+            <div style={{ padding: '0 16px 10px', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {item.detalle.map((d, i) => (
+                <span key={i} style={{
+                  fontSize: 12, color: 'var(--carbon-60)', background: 'var(--masa-2)',
+                  borderRadius: 8, padding: '3px 8px', fontWeight: 600,
+                }}>
+                  {d.cantidad}× {d.cliente}{d.hora ? ` · ${d.hora}` : ''}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PanelPrincipal({ pedidos, actualizarPedido, onAbrirPedido, variedades }) {
   const hoy = hoyISO();
+  const [subVista, setSubVista] = useState('pedidos'); // 'pedidos' | 'produccion'
 
   const pedidosHoy = useMemo(() => {
     return pedidos
@@ -1274,7 +1432,8 @@ function PanelPrincipal({ pedidos, actualizarPedido, onAbrirPedido, variedades }
 
   const totalPizzasHoy = useMemo(() => pedidosHoy.reduce((acc, p) => acc + calcularTotalPizzas(p.items), 0), [pedidosHoy]);
   const pendientesHoy = useMemo(() => pedidosHoy.filter(p => p.estadoCocina !== 'entregado').length, [pedidosHoy]);
-  const listasParaEntregarHoy = useMemo(() => pedidosHoy.filter(p => p.estadoCocina === 'lista').length, [pedidosHoy]);
+  const enCaminoHoy = useMemo(() => pedidosHoy.filter(p => p.estadoCocina === 'en_camino').length, [pedidosHoy]);
+  const listosHoy = useMemo(() => pedidosHoy.filter(p => p.estadoCocina === 'lista').length, [pedidosHoy]);
 
   const cambiarEstado = (id, nuevo) => actualizarPedido(id, { estadoCocina: nuevo });
 
@@ -1282,58 +1441,80 @@ function PanelPrincipal({ pedidos, actualizarPedido, onAbrirPedido, variedades }
     <div style={{ paddingBottom: 110 }}>
       <Encabezado titulo="Panel principal" subtitulo={formatoFechaLarga(hoy)} />
 
-      <div style={{ padding: '0 18px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 18 }}>
+      {/* Métricas del día */}
+      <div style={{ padding: '0 18px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
         <div style={{
           background: 'linear-gradient(155deg, var(--terracota), var(--terracota-d))',
-          borderRadius: 'var(--radio)', padding: '16px 16px', color: '#fff',
+          borderRadius: 'var(--radio)', padding: '16px', color: '#fff',
         }}>
           <Icon name="pizza" size={20} />
           <div className="display" style={{ fontSize: 30, marginTop: 8, lineHeight: 1 }}>{totalPizzasHoy}</div>
-          <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 4, fontWeight: 600 }}>Pizzas a entregar hoy</div>
+          <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 4, fontWeight: 600 }}>Unidades hoy</div>
         </div>
         <div style={{
           background: 'var(--superficie)', border: '1px solid var(--borde)',
-          borderRadius: 'var(--radio)', padding: '16px 16px',
+          borderRadius: 'var(--radio)', padding: '16px',
         }}>
           <Icon name="lista" size={20} style={{ color: 'var(--queso-d)' }} />
           <div className="display" style={{ fontSize: 30, marginTop: 8, lineHeight: 1, color: 'var(--carbon)' }}>{pendientesHoy}</div>
-          <div style={{ fontSize: 12.5, color: 'var(--carbon-60)', marginTop: 4, fontWeight: 600 }}>Pedidos pendientes</div>
+          <div style={{ fontSize: 12.5, color: 'var(--carbon-60)', marginTop: 4, fontWeight: 600 }}>Pendientes</div>
         </div>
       </div>
 
-      {listasParaEntregarHoy > 0 && (
-        <div style={{
-          margin: '0 18px 16px', background: 'var(--banner-bg)', color: 'var(--banner-color)',
-          borderRadius: 14, padding: '11px 14px', fontSize: 13.5, fontWeight: 700,
-          display: 'flex', alignItems: 'center', gap: 8,
-        }}>
-          <Icon name="horno" size={17} /> {listasParaEntregarHoy} pedido{listasParaEntregarHoy !== 1 ? 's' : ''} listo{listasParaEntregarHoy !== 1 ? 's' : ''} para entregar
+      {/* Alertas de estado */}
+      {listosHoy > 0 && (
+        <div style={{ margin: '0 18px 10px', background: 'var(--banner-bg)', color: 'var(--banner-color)', borderRadius: 14, padding: '10px 14px', fontSize: 13.5, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Icon name="horno" size={17} /> {listosHoy} pedido{listosHoy !== 1 ? 's' : ''} listo{listosHoy !== 1 ? 's' : ''} para entregar
+        </div>
+      )}
+      {enCaminoHoy > 0 && (
+        <div style={{ margin: '0 18px 10px', background: 'var(--azul-bg)', color: 'var(--azul)', borderRadius: 14, padding: '10px 14px', fontSize: 13.5, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Icon name="camion" size={17} /> {enCaminoHoy} en camino
         </div>
       )}
 
-      <div style={{ padding: '0 18px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-          <h2 style={{ margin: 0, fontSize: 17, color: 'var(--carbon)' }}>Pedidos de hoy</h2>
-          <span style={{ fontSize: 13, color: 'var(--carbon-35)', fontWeight: 600 }}>({pedidosHoy.length})</span>
-        </div>
+      {/* Toggle Pedidos / Producción */}
+      <div style={{ display: 'flex', gap: 8, padding: '4px 18px 14px' }}>
+        {[
+          { id: 'pedidos', label: 'Pedidos', icon: 'lista' },
+          { id: 'produccion', label: 'Producción', icon: 'produccion' },
+        ].map(sv => (
+          <button key={sv.id} onClick={() => setSubVista(sv.id)} style={{
+            flex: 1, padding: '10px', borderRadius: 13, fontSize: 14, fontWeight: 700,
+            border: subVista === sv.id ? 'none' : '1px solid var(--borde)',
+            background: subVista === sv.id ? 'var(--terracota)' : 'var(--superficie)',
+            color: subVista === sv.id ? '#fff' : 'var(--carbon-60)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+          }}>
+            <Icon name={sv.icon} size={16} /> {sv.label}
+          </button>
+        ))}
+      </div>
 
-        {pedidosHoy.length === 0 ? (
-          <EstadoVacio
-            icono="horno"
-            titulo="Sin pedidos para hoy"
-            texto="Cuando cargues un pedido con entrega para hoy, va a aparecer acá ordenado por hora."
-          />
+      <div style={{ padding: '0 18px' }}>
+        {subVista === 'produccion' ? (
+          <VistaProduccion pedidosHoy={pedidosHoy} variedades={variedades} />
         ) : (
-          pedidosHoy.map(p => (
-            <TarjetaPedido
-              key={p.id}
-              pedido={p}
-              onCambiarEstadoCocina={cambiarEstado}
-              onAbrir={onAbrirPedido}
-              variedades={variedades}
-              onActualizarPedido={actualizarPedido}
-            />
-          ))
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <h2 style={{ margin: 0, fontSize: 17, color: 'var(--carbon)' }}>Pedidos de hoy</h2>
+              <span style={{ fontSize: 13, color: 'var(--carbon-35)', fontWeight: 600 }}>({pedidosHoy.length})</span>
+            </div>
+            {pedidosHoy.length === 0 ? (
+              <EstadoVacio icono="horno" titulo="Sin pedidos para hoy" texto="Cuando cargues un pedido con entrega para hoy, aparece acá ordenado por hora." />
+            ) : (
+              pedidosHoy.map(p => (
+                <TarjetaPedido
+                  key={p.id}
+                  pedido={p}
+                  onCambiarEstadoCocina={cambiarEstado}
+                  onAbrir={onAbrirPedido}
+                  variedades={variedades}
+                  onActualizarPedido={actualizarPedido}
+                />
+              ))
+            )}
+          </>
         )}
       </div>
     </div>
@@ -1459,10 +1640,10 @@ const inputEstilo = {
   color: 'var(--carbon)',
 };
 
-function FormularioPedido({ pedidoExistente, onGuardar, onCancelar, onEliminar, variedades, onAbrirVariedades }) {
+function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onEliminar, variedades, onAbrirVariedades, sugerirClientes, historialCliente }) {
   const esEdicion = !!pedidoExistente;
-  const [cliente, setCliente] = useState(pedidoExistente?.cliente || '');
-  const [telefono, setTelefono] = useState(pedidoExistente?.telefono || '');
+  const [cliente, setCliente] = useState(pedidoExistente?.cliente || prefill?.cliente || '');
+  const [telefono, setTelefono] = useState(pedidoExistente?.telefono || prefill?.telefono || '');
   const [fecha, setFecha] = useState(pedidoExistente?.fecha || hoyISO());
   const [hora, setHora] = useState(pedidoExistente?.hora || '');
   const [tipoEntrega, setTipoEntrega] = useState(pedidoExistente?.tipoEntrega || 'domicilio');
@@ -1474,6 +1655,8 @@ function FormularioPedido({ pedidoExistente, onGuardar, onCancelar, onEliminar, 
   const [totalManual, setTotalManual] = useState(pedidoExistente?.total ?? null);
   const [usarTotalAuto, setUsarTotalAuto] = useState(pedidoExistente ? false : true);
   const [confirmarBorrado, setConfirmarBorrado] = useState(false);
+  const [sugerencias, setSugerencias] = useState([]);
+  const [mostrarSugerencias, setMostrarSugerencias] = useState(false);
 
   const totalSugerido = useMemo(() => calcularTotalSugerido(items, variedades), [items, variedades]);
   const totalFinal = usarTotalAuto ? totalSugerido : (Number(totalManual) || 0);
@@ -1532,7 +1715,63 @@ function FormularioPedido({ pedidoExistente, onGuardar, onCancelar, onEliminar, 
         {/* Cliente */}
         <div style={{ marginBottom: 18 }}>
           <CampoLabel>Nombre del cliente</CampoLabel>
-          <input style={inputEstilo} value={cliente} onChange={e => setCliente(e.target.value)} placeholder="Ej: Marina Lopez" />
+          <div style={{ position: 'relative' }}>
+            <input
+              style={inputEstilo}
+              value={cliente}
+              onChange={e => {
+                const v = e.target.value;
+                setCliente(v);
+                const s = sugerirClientes ? sugerirClientes(v) : [];
+                setSugerencias(s);
+                setMostrarSugerencias(s.length > 0);
+              }}
+              onFocus={() => {
+                if (sugerencias.length > 0) setMostrarSugerencias(true);
+              }}
+              onBlur={() => setTimeout(() => setMostrarSugerencias(false), 150)}
+              placeholder="Ej: Marina Lopez"
+              autoComplete="off"
+            />
+            {mostrarSugerencias && sugerencias.length > 0 && (
+              <div style={{
+                position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50,
+                background: 'var(--superficie-2)', border: '1px solid var(--borde)',
+                borderRadius: 14, marginTop: 4, overflow: 'hidden', boxShadow: 'var(--sombra)',
+              }}>
+                {sugerencias.map(s => {
+                  const hist = historialCliente ? historialCliente(s.nombre) : null;
+                  return (
+                    <button
+                      key={s.id}
+                      onMouseDown={() => {
+                        setCliente(s.nombre);
+                        setTelefono(s.telefono || telefono);
+                        setSugerencias([]);
+                        setMostrarSugerencias(false);
+                      }}
+                      style={{
+                        width: '100%', padding: '11px 14px', border: 'none', borderTop: '1px solid var(--borde)',
+                        background: 'transparent', textAlign: 'left', display: 'flex',
+                        justifyContent: 'space-between', alignItems: 'center',
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 14.5, color: 'var(--carbon)' }}>{s.nombre}</div>
+                        <div style={{ fontSize: 12, color: 'var(--carbon-35)' }}>{s.telefono}</div>
+                      </div>
+                      {hist && (
+                        <div style={{ textAlign: 'right', fontSize: 12, color: 'var(--carbon-35)' }}>
+                          <div style={{ fontWeight: 700, color: 'var(--terracota)' }}>{hist.pedidos.length} pedidos</div>
+                          <div>{formatoMoneda(hist.totalGastado)}</div>
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
 
         <div style={{ marginBottom: 18 }}>
@@ -1830,8 +2069,9 @@ function FormularioPedido({ pedidoExistente, onGuardar, onCancelar, onEliminar, 
    PANTALLA: DETALLE DE PEDIDO
    ========================================================= */
 
-function DetallePedido({ pedido, onCerrar, onEditar, actualizarPedido, variedades }) {
+function DetallePedido({ pedido, onCerrar, onEditar, actualizarPedido, variedades, historialCliente }) {
   if (!pedido) return null;
+  const hist = historialCliente ? historialCliente(pedido.cliente) : null;
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'var(--masa)', zIndex: 45, display: 'flex', flexDirection: 'column' }}>
@@ -1856,7 +2096,20 @@ function DetallePedido({ pedido, onCerrar, onEditar, actualizarPedido, variedade
           <Icon name="usuario" size={20} style={{ color: 'var(--carbon-35)' }} />
           <h1 className="display" style={{ margin: 0, fontSize: 24, color: 'var(--carbon)' }}>{pedido.cliente}</h1>
         </div>
-        {pedido.telefono && <div style={{ color: 'var(--carbon-60)', fontSize: 14.5, marginLeft: 30, marginBottom: 16 }}>{pedido.telefono}</div>}
+        {pedido.telefono && <div style={{ color: 'var(--carbon-60)', fontSize: 14.5, marginLeft: 30, marginBottom: hist ? 8 : 16 }}>{pedido.telefono}</div>}
+        {hist && hist.pedidos.length > 1 && (
+          <div style={{
+            marginLeft: 30, marginBottom: 16, display: 'flex', gap: 10, flexWrap: 'wrap',
+          }}>
+            <div style={{ background: 'var(--chip-activo-bg)', borderRadius: 10, padding: '5px 10px', fontSize: 12.5, color: 'var(--terracota-d)', fontWeight: 700 }}>
+              <Icon name="estrella" size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />
+              {hist.pedidos.length} pedidos
+            </div>
+            <div style={{ background: 'var(--superficie)', borderRadius: 10, padding: '5px 10px', fontSize: 12.5, color: 'var(--carbon-60)', fontWeight: 700 }}>
+              {formatoMoneda(hist.totalGastado)} en total
+            </div>
+          </div>
+        )}
 
         {/* Estado de cocina editable */}
         <div style={{ marginBottom: 14 }}>
@@ -1946,17 +2199,30 @@ function DetallePedido({ pedido, onCerrar, onEditar, actualizarPedido, variedade
         )}
 
         {pedido.telefono && (
-          <a
-            href={linkWhatsapp(pedido.telefono, pedido.cliente, pedido.estadoCocina, pedido.tipoEntrega)}
-            target="_blank" rel="noopener noreferrer"
-            style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-              padding: '14px', borderRadius: 16, background: 'var(--oliva-bg)', color: 'var(--oliva)',
-              fontWeight: 800, fontSize: 15, textDecoration: 'none', marginBottom: 14,
-            }}
-          >
-            <Icon name="whatsapp" size={19} /> Escribir por WhatsApp
-          </a>
+          <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+            <a
+              href={ticketWhatsapp(pedido, variedades)}
+              target="_blank" rel="noopener noreferrer"
+              style={{
+                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+                padding: '13px', borderRadius: 16, background: 'var(--oliva-bg)', color: 'var(--oliva)',
+                fontWeight: 800, fontSize: 14, textDecoration: 'none',
+              }}
+            >
+              <Icon name="ticket" size={17} /> Ticket
+            </a>
+            <a
+              href={linkWhatsapp(pedido.telefono, pedido.cliente, pedido.estadoCocina, pedido.tipoEntrega)}
+              target="_blank" rel="noopener noreferrer"
+              style={{
+                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+                padding: '13px', borderRadius: 16, background: 'var(--oliva-bg)', color: 'var(--oliva)',
+                fontWeight: 800, fontSize: 14, textDecoration: 'none',
+              }}
+            >
+              <Icon name="whatsapp" size={17} /> WhatsApp
+            </a>
+          </div>
         )}
       </div>
     </div>
@@ -2007,6 +2273,7 @@ function pedidosEntreFechas(pedidos, desde, hasta) {
 
 function calcularStats(lista, variedades) {
   let totalVentas = 0, cobrado = 0, pendienteCobrar = 0, efectivo = 0, transferencia = 0;
+  let costoTotal = 0, tieneCostos = false;
   const rankingMap = {};
 
   lista.forEach(p => {
@@ -2018,7 +2285,10 @@ function calcularStats(lista, variedades) {
     efectivo += ep.efectivo;
     transferencia += ep.transferencia;
     (p.items || []).forEach(it => {
-      rankingMap[it.saborId] = (rankingMap[it.saborId] || 0) + Number(it.cantidad || 0);
+      const cant = Number(it.cantidad) || 0;
+      rankingMap[it.saborId] = (rankingMap[it.saborId] || 0) + cant;
+      const v = variedades.find(s => s.id === it.saborId);
+      if (v && v.costo > 0) { costoTotal += v.costo * cant; tieneCostos = true; }
     });
   });
 
@@ -2026,7 +2296,9 @@ function calcularStats(lista, variedades) {
     .map(s => ({ ...s, cantidad: rankingMap[s.id] || 0 }))
     .sort((a, b) => b.cantidad - a.cantidad);
 
-  return { totalVentas, cobrado, pendienteCobrar, efectivo, transferencia, ranking, cantidad: lista.length };
+  const ganancia = tieneCostos ? totalVentas - costoTotal : null;
+
+  return { totalVentas, cobrado, pendienteCobrar, efectivo, transferencia, ranking, cantidad: lista.length, costoTotal, ganancia, tieneCostos };
 }
 
 /* =========================================================
@@ -2294,6 +2566,42 @@ function Balances({ pedidos, variedades }) {
               </div>
             </div>
 
+            {/* Ganancia bruta (solo si hay costos cargados) */}
+            {stats.tieneCostos && (
+              <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 16, marginBottom: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 800, fontSize: 14.5, color: 'var(--carbon)', marginBottom: 10 }}>
+                  <Icon name="tendencia" size={17} /> Ganancia bruta estimada
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>VENTAS</div>
+                    <div style={{ fontWeight: 800, fontSize: 15, color: 'var(--carbon)' }}>{formatoMoneda(stats.totalVentas)}</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>COSTO</div>
+                    <div style={{ fontWeight: 800, fontSize: 15, color: 'var(--rojo-alerta)' }}>{formatoMoneda(stats.costoTotal)}</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>GANANCIA</div>
+                    <div style={{ fontWeight: 800, fontSize: 15, color: 'var(--oliva)' }}>{formatoMoneda(stats.ganancia)}</div>
+                  </div>
+                </div>
+                <div style={{ marginTop: 10, height: 8, borderRadius: 999, background: 'var(--masa-2)', overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%', borderRadius: 999,
+                    width: stats.totalVentas > 0 ? `${Math.round((stats.ganancia / stats.totalVentas) * 100)}%` : '0%',
+                    background: 'linear-gradient(90deg, var(--queso-d), var(--oliva))',
+                  }} />
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--carbon-35)', marginTop: 6, fontWeight: 700, textAlign: 'right' }}>
+                  {stats.totalVentas > 0 ? Math.round((stats.ganancia / stats.totalVentas) * 100) : 0}% margen
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--carbon-35)', marginTop: 4 }}>
+                  * Basado en costos cargados en Variedades. Cargá el costo de producción de cada variedad para ver esto.
+                </div>
+              </div>
+            )}
+
             {/* Desglose de caja */}
             <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 16, marginBottom: 12 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 800, fontSize: 14.5, color: 'var(--carbon)', marginBottom: 12 }}>
@@ -2354,106 +2662,409 @@ function Balances({ pedidos, variedades }) {
    PANTALLA: GESTIÓN DE VARIEDADES (sabores)
    ========================================================= */
 
-function FilaVariedad({ variedad, onActualizar, onEliminar, onPedirConfirmacionBorrado }) {
-  const [editando, setEditando] = useState(false);
-  const [nombre, setNombre] = useState(variedad.nombre);
-  const [precio, setPrecio] = useState(variedad.precio);
-  const [categoria, setCategoria] = useState(variedad.categoria || 'pizza');
+function margenPct(precio, costo) {
+  const p = Number(precio) || 0;
+  const c = Number(costo) || 0;
+  if (p === 0) return 0;
+  return Math.round(((p - c) / p) * 100);
+}
 
-  useEffect(() => {
-    setNombre(variedad.nombre);
-    setPrecio(variedad.precio);
-    setCategoria(variedad.categoria || 'pizza');
-  }, [variedad.nombre, variedad.precio, variedad.categoria]);
+function ChipMargen({ precio, costo }) {
+  const pct = margenPct(precio, costo);
+  const c = Number(costo) || 0;
+  if (c === 0) return null;
+  const color = pct >= 60 ? 'var(--oliva)' : pct >= 40 ? 'var(--queso-d)' : 'var(--rojo-alerta)';
+  const bg   = pct >= 60 ? 'var(--oliva-bg)' : pct >= 40 ? 'var(--banner-bg)' : 'var(--rojo-alerta-bg)';
+  return (
+    <span style={{ fontSize: 11.5, fontWeight: 800, color, background: bg, borderRadius: 8, padding: '2px 7px' }}>
+      {pct}% margen
+    </span>
+  );
+}
 
-  const guardarCambios = () => {
-    const nombreLimpio = nombre.trim();
-    if (!nombreLimpio) { setNombre(variedad.nombre); setEditando(false); return; }
-    onActualizar(variedad.id, { nombre: nombreLimpio, precio: Number(precio) || 0, categoria });
-    setEditando(false);
-  };
+/* =========================================================
+   PANTALLA: CLIENTES FRECUENTES
+   ========================================================= */
+function PantallaClientes({ clientes, historialCliente, onCerrar, onNuevoPedidoParaCliente, variedades }) {
+  const [busqueda, setBusqueda] = useState('');
+  const [clienteSeleccionado, setClienteSeleccionado] = useState(null);
 
-  if (editando) {
+  const filtrados = useMemo(() => {
+    if (!busqueda.trim()) return clientes;
+    const q = busqueda.toLowerCase();
+    return clientes.filter(c => c.nombre.toLowerCase().includes(q) || c.telefono.includes(q));
+  }, [clientes, busqueda]);
+
+  if (clienteSeleccionado) {
+    const hist = historialCliente(clienteSeleccionado.nombre);
+    const promedio = hist && hist.pedidos.length > 0
+      ? Math.round(hist.totalGastado / hist.pedidos.length)
+      : 0;
+
+    // Sabores más pedidos por este cliente
+    const rankingMap = {};
+    (hist?.pedidos || []).forEach(p =>
+      (p.items || []).forEach(it => {
+        rankingMap[it.saborId] = (rankingMap[it.saborId] || 0) + Number(it.cantidad || 0);
+      })
+    );
+    const favs = Object.entries(rankingMap)
+      .map(([id, cant]) => {
+        const v = variedades.find(s => s.id === id);
+        return { nombre: v ? v.nombre : id, cant };
+      })
+      .sort((a, b) => b.cant - a.cant)
+      .slice(0, 3);
+
     return (
-      <div style={{ padding: '13px 14px', borderTop: '1px solid var(--masa-2)', background: 'var(--masa-2)' }}>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-          <input
-            autoFocus
-            value={nombre}
-            onChange={e => setNombre(e.target.value)}
-            placeholder="Nombre de la variedad"
-            style={{ ...inputEstilo, flex: 1, padding: '10px 12px', fontSize: 14.5 }}
-          />
+      <div style={{ position: 'fixed', inset: 0, background: 'var(--masa)', zIndex: 55, display: 'flex', flexDirection: 'column' }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '16px',
+          borderBottom: '1px solid var(--borde)', background: 'var(--superficie)', flexShrink: 0,
+          paddingTop: 'calc(16px + env(safe-area-inset-top))',
+        }}>
+          <button onClick={() => setClienteSeleccionado(null)} style={{ border: 'none', background: 'var(--masa-2)', borderRadius: 12, width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--carbon)' }}>
+            <Icon name="volver" size={20} />
+          </button>
+          <h2 style={{ margin: 0, fontSize: 18, color: 'var(--carbon)' }}>{clienteSeleccionado.nombre}</h2>
         </div>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-          {CATEGORIAS_VARIEDAD.map(cat => (
-            <button
-              key={cat.id}
-              onClick={() => setCategoria(cat.id)}
-              style={{
-                flex: 1, padding: '9px', borderRadius: 12, fontSize: 13, fontWeight: 700,
-                border: categoria === cat.id ? '2px solid var(--terracota)' : '1px solid var(--borde)',
-                background: categoria === cat.id ? 'var(--chip-activo-bg)' : 'var(--superficie)',
-                color: categoria === cat.id ? 'var(--terracota-d)' : 'var(--carbon-60)',
-              }}
-            >{cat.label}</button>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '18px 18px 100px' }}>
+          {/* Stats del cliente */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 16 }}>
+            {[
+              { label: 'Pedidos', valor: hist?.pedidos.length || 0, color: 'var(--terracota)' },
+              { label: 'Total gastado', valor: formatoMoneda(hist?.totalGastado || 0), color: 'var(--oliva)' },
+              { label: 'Promedio', valor: formatoMoneda(promedio), color: 'var(--azul)' },
+            ].map(s => (
+              <div key={s.label} style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 14, padding: '12px 10px', textAlign: 'center' }}>
+                <div className="display" style={{ fontSize: 16, fontWeight: 800, color: s.color }}>{s.valor}</div>
+                <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginTop: 3 }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Favoritos */}
+          {favs.length > 0 && (
+            <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 14, marginBottom: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
+                Sus favoritas
+              </div>
+              {favs.map((f, i) => (
+                <div key={f.nombre} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderTop: i === 0 ? 'none' : '1px solid var(--masa-2)', fontSize: 14 }}>
+                  <span style={{ color: 'var(--carbon)', fontWeight: 600 }}>{i === 0 && <Icon name="estrella" size={13} style={{ color: 'var(--queso)', marginRight: 5 }} />}{f.nombre}</span>
+                  <span style={{ color: 'var(--terracota)', fontWeight: 800 }}>{f.cant} u.</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Pedidos anteriores */}
+          <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+            Historial
+          </div>
+          {(hist?.pedidos || []).map(p => (
+            <div key={p.id} style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 14, padding: '12px 14px', marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: 13.5, color: 'var(--carbon-60)', fontWeight: 600 }}>{formatoFechaCorta(p.fecha)}{p.hora ? ` · ${p.hora}` : ''}</span>
+                <span className="display" style={{ fontSize: 15, color: 'var(--terracota)' }}>{formatoMoneda(p.total)}</span>
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--carbon-35)' }}>
+                {(p.items || []).map(it => {
+                  const v = variedades.find(s => s.id === it.saborId);
+                  return `${it.cantidad}× ${v ? v.nombre : it.saborId}`;
+                }).join(' · ')}
+              </div>
+              {p.notas && <div style={{ fontSize: 12, color: 'var(--terracota-d)', marginTop: 4, fontStyle: 'italic' }}>"{p.notas}"</div>}
+            </div>
           ))}
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            type="number"
-            inputMode="decimal"
-            value={precio}
-            onChange={e => setPrecio(e.target.value)}
-            placeholder="Precio"
-            style={{ ...inputEstilo, flex: 1, padding: '10px 12px', fontSize: 14.5 }}
-          />
+
+        {/* Botón nuevo pedido para este cliente */}
+        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '14px 18px', paddingBottom: 'calc(14px + env(safe-area-inset-bottom))', background: 'var(--superficie)', borderTop: '1px solid var(--borde)' }}>
           <button
-            onClick={guardarCambios}
-            style={{
-              flexShrink: 0, padding: '0 16px', borderRadius: 12, border: 'none',
-              background: 'var(--terracota)', color: '#fff', fontWeight: 700, fontSize: 13.5,
-              display: 'flex', alignItems: 'center', gap: 5,
-            }}
+            onClick={() => onNuevoPedidoParaCliente(clienteSeleccionado)}
+            style={{ width: '100%', padding: '15px', borderRadius: 16, border: 'none', background: 'var(--terracota)', color: '#fff', fontWeight: 800, fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
           >
-            <Icon name="check" size={15} /> Listo
+            <Icon name="mas" size={18} /> Nuevo pedido para {clienteSeleccionado.nombre.split(' ')[0]}
           </button>
         </div>
       </div>
     );
   }
 
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'var(--masa)', zIndex: 55, display: 'flex', flexDirection: 'column' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '16px',
+        borderBottom: '1px solid var(--borde)', background: 'var(--superficie)', flexShrink: 0,
+        paddingTop: 'calc(16px + env(safe-area-inset-top))',
+      }}>
+        <button onClick={onCerrar} style={{ border: 'none', background: 'var(--masa-2)', borderRadius: 12, width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--carbon)' }}>
+          <Icon name="volver" size={20} />
+        </button>
+        <h2 style={{ margin: 0, fontSize: 18, color: 'var(--carbon)' }}>Clientes frecuentes</h2>
+      </div>
+
+      <div style={{ padding: '12px 18px 0' }}>
+        <input
+          value={busqueda} onChange={e => setBusqueda(e.target.value)}
+          placeholder="Buscar cliente…"
+          style={{ ...inputEstilo }}
+        />
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 18px 40px' }}>
+        {filtrados.length === 0 ? (
+          <EstadoVacio icono="clientes" titulo="Sin clientes aún" texto="Cada vez que cargués un pedido, el cliente se guarda automáticamente acá." />
+        ) : (
+          filtrados.map(c => (
+            <button
+              key={c.id}
+              onClick={() => setClienteSeleccionado(c)}
+              style={{
+                width: '100%', background: 'var(--superficie)', border: '1px solid var(--borde)',
+                borderRadius: 16, padding: '13px 16px', marginBottom: 10, textAlign: 'left',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 15.5, color: 'var(--carbon)' }}>{c.nombre}</div>
+                <div style={{ fontSize: 13, color: 'var(--carbon-35)', marginTop: 3 }}>
+                  {c.pedidos.length} pedido{c.pedidos.length !== 1 ? 's' : ''} · último {formatoFechaCorta(c.ultimoPedido)}
+                </div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div className="display" style={{ fontSize: 15, color: 'var(--terracota)' }}>{formatoMoneda(c.totalGastado)}</div>
+                <div style={{ fontSize: 11.5, color: 'var(--carbon-35)' }}>total gastado</div>
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Versión de la pantalla de clientes para la tab (no modal, scroll normal)
+function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPedidoParaCliente }) {
+  const [busqueda, setBusqueda] = useState('');
+  const [seleccionado, setSeleccionado] = useState(null);
+
+  const filtrados = useMemo(() => {
+    if (!busqueda.trim()) return clientes;
+    const q = busqueda.toLowerCase();
+    return clientes.filter(c => c.nombre.toLowerCase().includes(q) || c.telefono.includes(q));
+  }, [clientes, busqueda]);
+
+  if (seleccionado) {
+    const hist = historialCliente(seleccionado.nombre);
+    const promedio = hist?.pedidos.length > 0 ? Math.round(hist.totalGastado / hist.pedidos.length) : 0;
+    const rankingMap = {};
+    (hist?.pedidos || []).forEach(p => (p.items || []).forEach(it => {
+      rankingMap[it.saborId] = (rankingMap[it.saborId] || 0) + Number(it.cantidad || 0);
+    }));
+    const favs = Object.entries(rankingMap)
+      .map(([id, cant]) => ({ nombre: variedades.find(s => s.id === id)?.nombre || id, cant }))
+      .sort((a, b) => b.cant - a.cant).slice(0, 3);
+
+    return (
+      <div style={{ paddingBottom: 120 }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '16px',
+          background: 'var(--superficie)', borderBottom: '1px solid var(--borde)',
+          paddingTop: 'calc(16px + env(safe-area-inset-top))',
+        }}>
+          <button onClick={() => setSeleccionado(null)} style={{ border: 'none', background: 'var(--masa-2)', borderRadius: 12, width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--carbon)' }}>
+            <Icon name="volver" size={20} />
+          </button>
+          <h2 style={{ margin: 0, fontSize: 18, color: 'var(--carbon)' }}>{seleccionado.nombre}</h2>
+        </div>
+
+        <div style={{ padding: '16px 18px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 16 }}>
+            {[
+              { label: 'Pedidos', valor: hist?.pedidos.length || 0, color: 'var(--terracota)' },
+              { label: 'Total', valor: formatoMoneda(hist?.totalGastado || 0), color: 'var(--oliva)' },
+              { label: 'Promedio', valor: formatoMoneda(promedio), color: 'var(--azul)' },
+            ].map(s => (
+              <div key={s.label} style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 14, padding: '12px 8px', textAlign: 'center' }}>
+                <div className="display" style={{ fontSize: 15, fontWeight: 800, color: s.color }}>{s.valor}</div>
+                <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginTop: 3 }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {favs.length > 0 && (
+            <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 14, marginBottom: 14 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Sus favoritas</div>
+              {favs.map((f, i) => (
+                <div key={f.nombre} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderTop: i === 0 ? 'none' : '1px solid var(--masa-2)', fontSize: 14 }}>
+                  <span style={{ color: 'var(--carbon)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {i === 0 && <Icon name="estrella" size={13} style={{ color: 'var(--queso)' }} />}{f.nombre}
+                  </span>
+                  <span style={{ color: 'var(--terracota)', fontWeight: 800 }}>{f.cant} u.</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Historial</div>
+          {(hist?.pedidos || []).map(p => (
+            <div key={p.id} style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 14, padding: '12px 14px', marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                <span style={{ fontSize: 13, color: 'var(--carbon-60)', fontWeight: 600 }}>{formatoFechaCorta(p.fecha)}{p.hora ? ` · ${p.hora}` : ''}</span>
+                <span className="display" style={{ fontSize: 15, color: 'var(--terracota)' }}>{formatoMoneda(p.total)}</span>
+              </div>
+              <div style={{ fontSize: 12.5, color: 'var(--carbon-35)' }}>
+                {(p.items || []).map(it => `${it.cantidad}× ${variedades.find(s => s.id === it.saborId)?.nombre || it.saborId}`).join(' · ')}
+              </div>
+              {p.notas && <div style={{ fontSize: 12, color: 'var(--terracota-d)', marginTop: 3, fontStyle: 'italic' }}>"{p.notas}"</div>}
+            </div>
+          ))}
+
+          <button
+            onClick={() => onNuevoPedidoParaCliente(seleccionado)}
+            style={{ width: '100%', padding: '15px', borderRadius: 16, border: 'none', background: 'var(--terracota)', color: '#fff', fontWeight: 800, fontSize: 15.5, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 8 }}
+          >
+            <Icon name="mas" size={18} /> Nuevo pedido para {seleccionado.nombre.split(' ')[0]}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ paddingBottom: 110 }}>
+      <Encabezado titulo="Clientes" subtitulo={`${clientes.length} registrados`} />
+      <div style={{ padding: '0 18px 12px' }}>
+        <input value={busqueda} onChange={e => setBusqueda(e.target.value)} placeholder="Buscar…" style={inputEstilo} />
+      </div>
+      <div style={{ padding: '0 18px' }}>
+        {filtrados.length === 0 ? (
+          <EstadoVacio icono="clientes" titulo="Sin clientes todavía" texto="Aparecen automáticamente cuando cargás pedidos." />
+        ) : (
+          filtrados.map(c => (
+            <button key={c.id} onClick={() => setSeleccionado(c)} style={{
+              width: '100%', background: 'var(--superficie)', border: '1px solid var(--borde)',
+              borderRadius: 16, padding: '13px 16px', marginBottom: 10, textAlign: 'left',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 800, fontSize: 15.5, color: 'var(--carbon)' }}>{c.nombre}</div>
+                <div style={{ fontSize: 12.5, color: 'var(--carbon-35)', marginTop: 2 }}>
+                  {c.pedidos.length} pedido{c.pedidos.length !== 1 ? 's' : ''} · último {formatoFechaCorta(c.ultimoPedido)}
+                </div>
+              </div>
+              <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}>
+                  <Icon name="estrella" size={12} style={{ color: 'var(--queso)' }} />
+                  <span className="display" style={{ fontSize: 18, color: 'var(--terracota)' }}>{c.pedidos.length}</span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--carbon-35)' }}>{formatoMoneda(c.totalGastado)}</div>
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FilaVariedad({ variedad, onActualizar, onEliminar, onPedirConfirmacionBorrado }) {
+  const [editando, setEditando] = useState(false);
+  const [nombre, setNombre] = useState(variedad.nombre);
+  const [precio, setPrecio] = useState(variedad.precio);
+  const [costo, setCosto]   = useState(variedad.costo || 0);
+  const [categoria, setCategoria] = useState(variedad.categoria || 'pizza');
+
+  useEffect(() => {
+    setNombre(variedad.nombre);
+    setPrecio(variedad.precio);
+    setCosto(variedad.costo || 0);
+    setCategoria(variedad.categoria || 'pizza');
+  }, [variedad.nombre, variedad.precio, variedad.costo, variedad.categoria]);
+
+  const guardarCambios = () => {
+    const nombreLimpio = nombre.trim();
+    if (!nombreLimpio) { setNombre(variedad.nombre); setEditando(false); return; }
+    onActualizar(variedad.id, { nombre: nombreLimpio, precio: Number(precio) || 0, costo: Number(costo) || 0, categoria });
+    setEditando(false);
+  };
+
+  if (editando) {
+    const precioNum = Number(precio) || 0;
+    const costoNum  = Number(costo) || 0;
+    return (
+      <div style={{ padding: '13px 14px', borderTop: '1px solid var(--masa-2)', background: 'var(--masa-2)' }}>
+        <input
+          autoFocus value={nombre}
+          onChange={e => setNombre(e.target.value)}
+          placeholder="Nombre"
+          style={{ ...inputEstilo, marginBottom: 8, padding: '10px 12px', fontSize: 14.5 }}
+        />
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          {CATEGORIAS_VARIEDAD.map(cat => (
+            <button key={cat.id} onClick={() => setCategoria(cat.id)} style={{
+              flex: 1, padding: '9px', borderRadius: 12, fontSize: 13, fontWeight: 700,
+              border: categoria === cat.id ? '2px solid var(--terracota)' : '1px solid var(--borde)',
+              background: categoria === cat.id ? 'var(--chip-activo-bg)' : 'var(--superficie)',
+              color: categoria === cat.id ? 'var(--terracota-d)' : 'var(--carbon-60)',
+            }}>{cat.label}</button>
+          ))}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>PRECIO VENTA</div>
+            <input type="number" inputMode="decimal" value={precio}
+              onChange={e => setPrecio(e.target.value)} placeholder="Precio"
+              style={{ ...inputEstilo, padding: '10px 12px', fontSize: 14.5 }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>COSTO PRODUCCIÓN</div>
+            <input type="number" inputMode="decimal" value={costo}
+              onChange={e => setCosto(e.target.value)} placeholder="Costo"
+              style={{ ...inputEstilo, padding: '10px 12px', fontSize: 14.5 }} />
+          </div>
+        </div>
+        {costoNum > 0 && precioNum > 0 && (
+          <div style={{ marginBottom: 8, fontSize: 13, color: 'var(--carbon-60)' }}>
+            Ganancia: <strong style={{ color: 'var(--oliva)' }}>{formatoMoneda(precioNum - costoNum)}</strong>
+            {' '}· <ChipMargen precio={precioNum} costo={costoNum} />
+          </div>
+        )}
+        <button onClick={guardarCambios} style={{
+          width: '100%', padding: '11px', borderRadius: 12, border: 'none',
+          background: 'var(--terracota)', color: '#fff', fontWeight: 700, fontSize: 14,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+        }}>
+          <Icon name="check" size={15} /> Guardar
+        </button>
+      </div>
+    );
+  }
+
   const catLabel = CATEGORIAS_VARIEDAD.find(c => c.id === (variedad.categoria || 'pizza'))?.label || 'Pizza';
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '13px 14px', borderTop: '1px solid var(--masa-2)',
-    }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 14px', borderTop: '1px solid var(--masa-2)' }}>
       <div style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--carbon)' }}>{variedad.nombre}</div>
-        <div style={{ fontSize: 12.5, color: 'var(--carbon-35)', marginTop: 2 }}>{catLabel} · {formatoMoneda(variedad.precio)}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 3, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12.5, color: 'var(--carbon-35)' }}>{catLabel} · {formatoMoneda(variedad.precio)}</span>
+          <ChipMargen precio={variedad.precio} costo={variedad.costo} />
+        </div>
       </div>
       <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-        <button
-          onClick={() => setEditando(true)}
-          aria-label={`Editar ${variedad.nombre}`}
-          style={{
-            width: 40, height: 40, borderRadius: 12, border: '1px solid var(--borde)',
-            background: 'var(--superficie)', color: 'var(--terracota)', display: 'flex',
-            alignItems: 'center', justifyContent: 'center',
-          }}
-        >
+        <button onClick={() => setEditando(true)} aria-label={`Editar ${variedad.nombre}`} style={{
+          width: 40, height: 40, borderRadius: 12, border: '1px solid var(--borde)',
+          background: 'var(--superficie)', color: 'var(--terracota)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
           <Icon name="editar" size={17} />
         </button>
-        <button
-          onClick={() => onPedirConfirmacionBorrado(variedad)}
-          aria-label={`Eliminar ${variedad.nombre}`}
-          style={{
-            width: 40, height: 40, borderRadius: 12, border: '1px solid var(--rojo-alerta-bg)',
-            background: 'var(--rojo-alerta-bg)', color: 'var(--rojo-alerta)', display: 'flex',
-            alignItems: 'center', justifyContent: 'center',
-          }}
-        >
+        <button onClick={() => onPedirConfirmacionBorrado(variedad)} aria-label={`Eliminar ${variedad.nombre}`} style={{
+          width: 40, height: 40, borderRadius: 12, border: '1px solid var(--rojo-alerta-bg)',
+          background: 'var(--rojo-alerta-bg)', color: 'var(--rojo-alerta)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
           <Icon name="basura" size={17} />
         </button>
       </div>
@@ -2461,18 +3072,25 @@ function FilaVariedad({ variedad, onActualizar, onEliminar, onPedirConfirmacionB
   );
 }
 
+/* =========================================================
+   PANTALLA: CLIENTES FRECUENTES
+   ========================================================= */
+
+
 function GestionVariedades({ variedades, crearVariedad, actualizarVariedad, eliminarVariedad, onCerrar }) {
   const [nombreNuevo, setNombreNuevo] = useState('');
   const [precioNuevo, setPrecioNuevo] = useState('');
+  const [costoNuevo, setCostoNuevo] = useState('');
   const [categoriaNueva, setCategoriaNueva] = useState('pizza');
   const [aBorrar, setABorrar] = useState(null);
 
   const agregarVariedad = () => {
     const nombreLimpio = nombreNuevo.trim();
     if (!nombreLimpio) return;
-    crearVariedad(nombreLimpio, precioNuevo, categoriaNueva);
+    crearVariedad(nombreLimpio, precioNuevo, categoriaNueva, costoNuevo);
     setNombreNuevo('');
     setPrecioNuevo('');
+    setCostoNuevo('');
   };
 
   const confirmarBorrado = () => {
@@ -2519,28 +3137,38 @@ function GestionVariedades({ variedades, crearVariedad, actualizarVariedad, elim
                 >{cat.label}</button>
               ))}
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                type="number"
-                inputMode="decimal"
-                value={precioNuevo}
-                onChange={e => setPrecioNuevo(e.target.value)}
-                placeholder="Precio"
-                style={{ ...inputEstilo, flex: 1 }}
-              />
-              <button
-                onClick={agregarVariedad}
-                disabled={!nombreNuevo.trim()}
-                style={{
-                  flexShrink: 0, padding: '0 18px', borderRadius: 14, border: 'none',
-                  background: nombreNuevo.trim() ? 'var(--terracota)' : 'var(--gris-bg)',
-                  color: nombreNuevo.trim() ? '#fff' : 'var(--carbon-35)', fontWeight: 800, fontSize: 14.5,
-                  display: 'flex', alignItems: 'center', gap: 6,
-                }}
-              >
-                <Icon name="mas" size={17} /> Agregar
-              </button>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>PRECIO VENTA</div>
+                <input type="number" inputMode="decimal" value={precioNuevo}
+                  onChange={e => setPrecioNuevo(e.target.value)} placeholder="0"
+                  style={{ ...inputEstilo }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>COSTO PRODUCCIÓN</div>
+                <input type="number" inputMode="decimal" value={costoNuevo}
+                  onChange={e => setCostoNuevo(e.target.value)} placeholder="0"
+                  style={{ ...inputEstilo }} />
+              </div>
             </div>
+            {Number(precioNuevo) > 0 && Number(costoNuevo) > 0 && (
+              <div style={{ marginBottom: 8, fontSize: 13, color: 'var(--carbon-60)' }}>
+                Ganancia: <strong style={{ color: 'var(--oliva)' }}>{formatoMoneda(Number(precioNuevo) - Number(costoNuevo))}</strong>
+                {' '}<ChipMargen precio={Number(precioNuevo)} costo={Number(costoNuevo)} />
+              </div>
+            )}
+            <button
+              onClick={agregarVariedad}
+              disabled={!nombreNuevo.trim()}
+              style={{
+                width: '100%', padding: '12px', borderRadius: 14, border: 'none',
+                background: nombreNuevo.trim() ? 'var(--terracota)' : 'var(--gris-bg)',
+                color: nombreNuevo.trim() ? '#fff' : 'var(--carbon-35)', fontWeight: 800, fontSize: 14.5,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              }}
+            >
+              <Icon name="mas" size={17} /> Agregar variedad
+            </button>
           </div>
         </div>
 
@@ -2617,21 +3245,32 @@ function GestionVariedades({ variedades, crearVariedad, actualizarVariedad, elim
   );
 }
 
-/* =========================================================
-   COMPONENTE RAÍZ
-   ========================================================= */
-
 function App() {
   const { pedidos, crearPedido, actualizarPedido, eliminarPedido } = usePedidos();
   const { variedades, crearVariedad, actualizarVariedad, eliminarVariedad } = useVariedades();
+  const { clientes, sugerirClientes, historialCliente } = useClientes(pedidos);
+
   const [vista, setVista] = useState('panel');
   const [formularioAbierto, setFormularioAbierto] = useState(false);
   const [pedidoEnEdicion, setPedidoEnEdicion] = useState(null);
+  const [pedidoPrefill, setPedidoPrefill] = useState(null);
   const [pedidoDetalle, setPedidoDetalle] = useState(null);
   const [variedadesAbierto, setVariedadesAbierto] = useState(false);
 
-  const abrirNuevo = () => { setPedidoEnEdicion(null); setFormularioAbierto(true); };
-  const abrirEdicion = (pedido) => { setPedidoDetalle(null); setPedidoEnEdicion(pedido); setFormularioAbierto(true); };
+  // Abrir formulario en blanco, o con datos prefill de un cliente frecuente
+  const abrirNuevo = useCallback((prefill = null) => {
+    setPedidoEnEdicion(null);
+    setPedidoPrefill(prefill);
+    setFormularioAbierto(true);
+  }, []);
+
+  const abrirEdicion = (pedido) => {
+    setPedidoDetalle(null);
+    setPedidoEnEdicion(pedido);
+    setPedidoPrefill(null);
+    setFormularioAbierto(true);
+  };
+
   const abrirDetalle = (pedido) => setPedidoDetalle(pedido);
 
   const handleGuardarFormulario = (datos) => {
@@ -2642,28 +3281,34 @@ function App() {
     }
     setFormularioAbierto(false);
     setPedidoEnEdicion(null);
+    setPedidoPrefill(null);
   };
 
   const handleEliminar = (id) => {
     eliminarPedido(id);
     setFormularioAbierto(false);
     setPedidoEnEdicion(null);
+    setPedidoPrefill(null);
   };
 
-  // mantener sincronizado el detalle abierto si el pedido cambia
+  // Mantener sincronizado el detalle abierto si el pedido cambia
   useEffect(() => {
     if (pedidoDetalle) {
       const actualizado = pedidos.find(p => p.id === pedidoDetalle.id);
       if (actualizado && actualizado !== pedidoDetalle) setPedidoDetalle(actualizado);
       if (!actualizado) setPedidoDetalle(null);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pedidos]);
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto', minHeight: '100%', position: 'relative', background: 'var(--masa)' }}>
       {vista === 'panel' && (
-        <PanelPrincipal pedidos={pedidos} actualizarPedido={actualizarPedido} onAbrirPedido={abrirDetalle} variedades={variedades} />
+        <PanelPrincipal
+          pedidos={pedidos}
+          actualizarPedido={actualizarPedido}
+          onAbrirPedido={abrirDetalle}
+          variedades={variedades}
+        />
       )}
       {vista === 'pedidos' && (
         <GestionPedidos
@@ -2678,18 +3323,29 @@ function App() {
       {vista === 'balances' && (
         <Balances pedidos={pedidos} variedades={variedades} />
       )}
+      {vista === 'clientes' && (
+        <PantallaClientesTab
+          clientes={clientes}
+          historialCliente={historialCliente}
+          variedades={variedades}
+          onNuevoPedidoParaCliente={(c) => { abrirNuevo(c); setVista('pedidos'); }}
+        />
+      )}
 
-      {vista !== 'balances' && <BotonFlotante onClick={abrirNuevo} />}
+      {vista !== 'balances' && <BotonFlotante onClick={() => abrirNuevo()} />}
       <NavInferior vista={vista} setVista={setVista} />
 
       {formularioAbierto && (
         <FormularioPedido
           pedidoExistente={pedidoEnEdicion}
+          prefill={pedidoPrefill}
           onGuardar={handleGuardarFormulario}
-          onCancelar={() => { setFormularioAbierto(false); setPedidoEnEdicion(null); }}
+          onCancelar={() => { setFormularioAbierto(false); setPedidoEnEdicion(null); setPedidoPrefill(null); }}
           onEliminar={handleEliminar}
           variedades={variedades}
           onAbrirVariedades={() => setVariedadesAbierto(true)}
+          sugerirClientes={sugerirClientes}
+          historialCliente={historialCliente}
         />
       )}
 
