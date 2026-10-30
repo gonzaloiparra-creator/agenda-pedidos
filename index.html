@@ -615,44 +615,104 @@ function normalizarTelefono(tel) {
 }
 
 function ticketWhatsapp(pedido, variedades) {
-  const items = (pedido.items || []).map(it => {
+  // Separar ítems por categoría (pizza / focaccia)
+  const pizzas = (pedido.items || []).filter(it => {
     const v = variedades.find(s => s.id === it.saborId);
-    return `  • ${it.cantidad}× ${v ? v.nombre : it.saborId}`;
-  }).join('\n');
+    return !v || (v.categoria || 'pizza') === 'pizza';
+  });
+  const focaccias = (pedido.items || []).filter(it => {
+    const v = variedades.find(s => s.id === it.saborId);
+    return v && v.categoria === 'focaccia';
+  });
+
+  const formatLinea = (it) => {
+    const v = variedades.find(s => s.id === it.saborId);
+    const nombre = v ? v.nombre : it.saborId;
+    const precio = Number(v?.precio) || 0;
+    const cant = Number(it.cantidad) || 0;
+    const subtotal = precio * cant;
+    if (cant > 1 && precio > 0) {
+      return `  • ${cant}× ${nombre} (${formatoMoneda(precio)} c/u) = *${formatoMoneda(subtotal)}*`;
+    } else if (precio > 0) {
+      return `  • ${nombre} = *${formatoMoneda(precio)}*`;
+    } else {
+      return `  • ${cant > 1 ? cant + '× ' : ''}${nombre}`;
+    }
+  };
+
+  const bloques = [];
+  if (pizzas.length > 0) {
+    bloques.push(`🍕 *Pizzas:*`);
+    bloques.push(...pizzas.map(formatLinea));
+  }
+  if (focaccias.length > 0) {
+    if (pizzas.length > 0) bloques.push('');
+    bloques.push(`🫓 *Focaccias:*`);
+    bloques.push(...focaccias.map(formatLinea));
+  }
+  const itemsTexto = bloques.join('\n');
+
   const entrega = pedido.tipoEntrega === 'domicilio'
     ? `📍 Envío a: ${pedido.direccion || 'a confirmar'}`
     : `🏠 Retira en local`;
   const hora = pedido.hora ? `🕐 Hora: ${pedido.hora}` : '';
   const notas = pedido.notas ? `📝 Notas: ${pedido.notas}` : '';
-  const total = `💰 Total: ${formatoMoneda(pedido.total)}`;
+  const totalLinea = `💰 *Total: ${formatoMoneda(pedido.total)}*`;
+
+  // Datos de transferencia: cuando se definió transferencia como forma de pago
+  const esTransferencia =
+    pedido.pago?.senia?.forma === 'transferencia' ||
+    pedido.pago?.saldo?.forma === 'transferencia' ||
+    pedido.estadoPago === 'transferencia';
+  const datosTransf = esTransferencia
+    ? `\n💳 *Para transferir:*\nAlias: *${ALIAS_TRANSFERENCIA}*\nTitular: ${TITULAR_TRANSFERENCIA}`
+    : '';
+
   const lineas = [
     `Hola ${pedido.cliente}! 🍕`,
     `Tu pedido de *Iparra Pizza* está confirmado:`,
     ``,
-    items,
+    itemsTexto,
     ``,
+    `─────────────────`,
+    totalLinea,
     entrega,
     hora,
     notas,
-    total,
+    datosTransf,
     ``,
     `¡Gracias! Cualquier consulta avisame 😊`,
-  ].filter(l => l !== undefined && !(l === '' && false)).join('\n');
+  ].filter(l => l !== null && l !== undefined).join('\n');
+
   const num = normalizarTelefono(pedido.telefono).replace(/^\+/, '');
   return `https://wa.me/${num}?text=${encodeURIComponent(lineas)}`;
 }
 
-function linkWhatsapp(telefono, nombre, estado, tipoEntrega) {
+const ALIAS_TRANSFERENCIA = 'iparra.pizza';
+const TITULAR_TRANSFERENCIA = 'Gonzalo Ismael Iparraguirre';
+
+function linkWhatsapp(telefono, nombre, estado, tipoEntrega, estadoPago) {
   const num = normalizarTelefono(telefono).replace(/^\+/, '');
   let mensaje = '';
+
+  // Solo agregar datos de transferencia cuando el método de pago ES transferencia
+  const datosTransferencia = estadoPago === 'transferencia'
+    ? `\n\n💳 *Datos para transferir:*\nAlias: *${ALIAS_TRANSFERENCIA}*\nTitular: ${TITULAR_TRANSFERENCIA}`
+    : '';
+
   if (estado === 'lista') {
     mensaje = tipoEntrega === 'domicilio'
-      ? `Hola ${nombre}! Tu pedido de pizzas ya está listo, en breve sale para tu domicilio. 🍕🛵`
-      : `Hola ${nombre}! Tu pedido de pizzas ya está listo para retirar. ¡Te esperamos! 🍕`;
+      ? `Hola ${nombre}! 🍕 Tu pedido de *Iparra Pizza* ya está listo, en breve sale para tu domicilio. 🛵`
+      : `Hola ${nombre}! 🍕 Tu pedido de *Iparra Pizza* ya está listo para retirar. ¡Te esperamos!`;
+    mensaje += datosTransferencia;
+  } else if (estado === 'en_camino') {
+    mensaje = `Hola ${nombre}! 🛵 Tu pedido de *Iparra Pizza* ya salió y está en camino a tu domicilio. ¡En breve llega!`;
+    mensaje += datosTransferencia;
   } else if (estado === 'entregado') {
-    mensaje = `Hola ${nombre}! Gracias por tu pedido, esperamos que lo disfrutes. 🍕`;
+    mensaje = `Hola ${nombre}! 🍕 Gracias por tu pedido de *Iparra Pizza*, esperamos que lo disfrutes mucho. ¡Hasta la próxima!`;
   } else {
-    mensaje = `Hola ${nombre}! Te escribo por tu pedido de pizzas. 🍕`;
+    mensaje = `Hola ${nombre}! Te escribo por tu pedido de *Iparra Pizza*. 🍕`;
+    mensaje += datosTransferencia;
   }
   return `https://wa.me/${num}?text=${encodeURIComponent(mensaje)}`;
 }
@@ -762,7 +822,37 @@ function usePedidos() {
     setPedidos(prev => prev.filter(p => p.id !== id));
   }, []);
 
-  return { pedidos, crearPedido, actualizarPedido, eliminarPedido };
+  // Fusiona dos clientes: todos los pedidos de nombreOrigen pasan a llamarse nombreDestino/telefonoDestino
+  const fusionarClientes = useCallback((nombreOrigen, nombreDestino, telefonoDestino) => {
+    const keyOrigen = nombreOrigen.trim().toLowerCase();
+    const keyDestino = nombreDestino.trim().toLowerCase();
+    setPedidos(prev => prev.map(p => {
+      const key = p.cliente.trim().toLowerCase();
+      // Pedidos del cliente de origen Y los que ya tenían el nombre destino
+      // (con otra mayúscula/espacios) quedan con el nombre y teléfono definitivos
+      if (key === keyOrigen || key === keyDestino) {
+        return { ...p, cliente: nombreDestino.trim(), telefono: telefonoDestino || p.telefono };
+      }
+      return p;
+    }));
+  }, []);
+
+  // Renombra un cliente en todos sus pedidos (nombre + teléfono)
+  const renombrarCliente = useCallback((nombreActual, nuevoNombre, nuevoTelefono) => {
+    const key = nombreActual.trim().toLowerCase();
+    setPedidos(prev => prev.map(p => {
+      if (p.cliente.trim().toLowerCase() === key) {
+        return {
+          ...p,
+          cliente: nuevoNombre.trim(),
+          telefono: nuevoTelefono !== undefined ? nuevoTelefono : p.telefono,
+        };
+      }
+      return p;
+    }));
+  }, []);
+
+  return { pedidos, crearPedido, actualizarPedido, eliminarPedido, fusionarClientes, renombrarCliente };
 }
 
 function useVariedades() {
@@ -905,6 +995,8 @@ function Icon({ name, size = 22, ...props }) {
       return <svg {...common}><line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/></svg>;
     case 'pizza':
       return <svg {...common}><path d="M12 3l9 16H3L12 3z"/><circle cx="11" cy="13" r="0.7" fill="currentColor" stroke="none"/><circle cx="13.5" cy="15.5" r="0.7" fill="currentColor" stroke="none"/><circle cx="9.5" cy="16.5" r="0.7" fill="currentColor" stroke="none"/></svg>;
+    case 'focaccia':
+      return <svg {...common}><rect x="3" y="7" width="18" height="11" rx="3"/><line x1="8" y1="7" x2="8" y2="18"/><line x1="16" y1="7" x2="16" y2="18"/><circle cx="12" cy="10" r="0.7" fill="currentColor" stroke="none"/><circle cx="12" cy="14.5" r="0.7" fill="currentColor" stroke="none"/></svg>;
     case 'usuario':
       return <svg {...common}><circle cx="12" cy="8" r="3.3"/><path d="M5 20c1-3.8 4-6 7-6s6 2.2 7 6"/></svg>;
     case 'casa':
@@ -1640,7 +1732,7 @@ const inputEstilo = {
   color: 'var(--carbon)',
 };
 
-function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onEliminar, variedades, onAbrirVariedades, sugerirClientes, historialCliente }) {
+function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onEliminar, variedades, onAbrirVariedades, sugerirClientes, historialCliente, renombrarCliente }) {
   const esEdicion = !!pedidoExistente;
   const [cliente, setCliente] = useState(pedidoExistente?.cliente || prefill?.cliente || '');
   const [telefono, setTelefono] = useState(pedidoExistente?.telefono || prefill?.telefono || '');
@@ -1657,6 +1749,15 @@ function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onE
   const [confirmarBorrado, setConfirmarBorrado] = useState(false);
   const [sugerencias, setSugerencias] = useState([]);
   const [mostrarSugerencias, setMostrarSugerencias] = useState(false);
+  const [aplicarRenombrado, setAplicarRenombrado] = useState(false); // mostrar opción de renombrar todos
+  const [aplicarATodos, setAplicarATodos] = useState(false);
+
+  // Nombre original del cliente (para detectar si cambió al editar)
+  const nombreOriginal = pedidoExistente?.cliente || '';
+  const telefonoOriginal = pedidoExistente?.telefono || '';
+  const nombreCambio = esEdicion && cliente.trim() && cliente.trim() !== nombreOriginal;
+  const telefonoCambio = esEdicion && telefono.trim() !== telefonoOriginal;
+  const hayCambioCliente = nombreCambio || telefonoCambio;
 
   const totalSugerido = useMemo(() => calcularTotalSugerido(items, variedades), [items, variedades]);
   const totalFinal = usarTotalAuto ? totalSugerido : (Number(totalManual) || 0);
@@ -1681,6 +1782,10 @@ function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onE
 
   const handleGuardar = () => {
     if (!valido) return;
+    // Si eligió aplicar el cambio de nombre/tel a todos los pedidos del cliente
+    if (aplicarATodos && hayCambioCliente && renombrarCliente && nombreOriginal) {
+      renombrarCliente(nombreOriginal, cliente.trim(), telefono.trim());
+    }
     onGuardar({
       cliente: cliente.trim(),
       telefono: telefono.trim(),
@@ -1725,6 +1830,13 @@ function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onE
                 const s = sugerirClientes ? sugerirClientes(v) : [];
                 setSugerencias(s);
                 setMostrarSugerencias(s.length > 0);
+                // Si estamos editando y el nombre cambió, ofrecer renombrar todos
+                if (esEdicion && pedidoExistente?.cliente &&
+                    v.trim().toLowerCase() !== pedidoExistente.cliente.trim().toLowerCase()) {
+                  setAplicarRenombrado(true);
+                } else {
+                  setAplicarRenombrado(false);
+                }
               }}
               onFocus={() => {
                 if (sugerencias.length > 0) setMostrarSugerencias(true);
@@ -1733,6 +1845,31 @@ function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onE
               placeholder="Ej: Marina Lopez"
               autoComplete="off"
             />
+            {/* Opción de renombrar masivo al editar pedido */}
+            {esEdicion && aplicarRenombrado && cliente.trim() && renombrarCliente && (
+              <div style={{
+                marginTop: 8, background: 'var(--azul-bg)', border: '1px solid var(--azul)',
+                borderRadius: 12, padding: '10px 12px', display: 'flex',
+                justifyContent: 'space-between', alignItems: 'center', gap: 10,
+              }}>
+                <span style={{ fontSize: 12.5, color: 'var(--azul)', fontWeight: 600, lineHeight: 1.4 }}>
+                  ¿Actualizar "{pedidoExistente.cliente}" a "{cliente.trim()}" en todos sus pedidos?
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    renombrarCliente(pedidoExistente.cliente, cliente.trim(), telefono || pedidoExistente.telefono);
+                    setAplicarRenombrado(false);
+                  }}
+                  style={{
+                    flexShrink: 0, padding: '7px 12px', borderRadius: 10, border: 'none',
+                    background: 'var(--azul)', color: '#fff', fontSize: 12.5, fontWeight: 800,
+                  }}
+                >
+                  Actualizar todos
+                </button>
+              </div>
+            )}
             {mostrarSugerencias && sugerencias.length > 0 && (
               <div style={{
                 position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50,
@@ -1772,6 +1909,31 @@ function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onE
               </div>
             )}
           </div>
+          {/* Toggle de renombrado masivo — solo visible al editar cuando cambió nombre/tel */}
+          {hayCambioCliente && renombrarCliente && (
+            <button
+              type="button"
+              onClick={() => setAplicarATodos(v => !v)}
+              style={{
+                marginTop: 8, width: '100%', padding: '10px 12px', borderRadius: 12, textAlign: 'left',
+                border: aplicarATodos ? '2px solid var(--azul)' : '1px solid var(--borde)',
+                background: aplicarATodos ? 'var(--azul-bg)' : 'var(--superficie)',
+                display: 'flex', alignItems: 'center', gap: 10,
+              }}
+            >
+              <div style={{
+                width: 20, height: 20, borderRadius: 6, flexShrink: 0,
+                background: aplicarATodos ? 'var(--azul)' : 'var(--masa-2)',
+                border: aplicarATodos ? 'none' : '1px solid var(--borde)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                {aplicarATodos && <Icon name="check" size={13} style={{ color: '#fff' }} />}
+              </div>
+              <div style={{ fontSize: 12.5, color: aplicarATodos ? 'var(--azul)' : 'var(--carbon-60)', fontWeight: 600, lineHeight: 1.4 }}>
+                Actualizar <strong>todos</strong> los pedidos anteriores de "{nombreOriginal}" con el nuevo nombre/teléfono
+              </div>
+            </button>
+          )}
         </div>
 
         <div style={{ marginBottom: 18 }}>
@@ -1887,7 +2049,9 @@ function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onE
                     fontSize: 11, fontWeight: 800, color: 'var(--carbon-35)',
                     textTransform: 'uppercase', letterSpacing: '0.08em',
                     background: 'var(--masa-2)',
+                    display: 'flex', alignItems: 'center', gap: 6,
                   }}>
+                    <Icon name={cat.id === 'focaccia' ? 'focaccia' : 'pizza'} size={13} />
                     {cat.label}s
                   </div>
                   {items.map((s, idx) => {
@@ -2625,7 +2789,7 @@ function Balances({ pedidos, variedades }) {
               return (
                 <div key={cat.id} style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 16, marginBottom: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 800, fontSize: 14.5, color: 'var(--carbon)', marginBottom: 14 }}>
-                    <Icon name="pizza" size={17} /> Ránking — {cat.label}s más vendidas
+                    <Icon name={cat.id === 'focaccia' ? 'focaccia' : 'pizza'} size={17} /> Ránking — {cat.label}s más vendidas
                   </div>
                   {itemsCat.every(r => r.cantidad === 0) ? (
                     <div style={{ fontSize: 13.5, color: 'var(--carbon-35)', textAlign: 'center', padding: '14px 0' }}>
@@ -2847,9 +3011,21 @@ function PantallaClientes({ clientes, historialCliente, onCerrar, onNuevoPedidoP
 }
 
 // Versión de la pantalla de clientes para la tab (no modal, scroll normal)
-function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPedidoParaCliente }) {
+function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPedidoParaCliente, fusionarClientes, renombrarCliente }) {
   const [busqueda, setBusqueda] = useState('');
   const [seleccionado, setSeleccionado] = useState(null);
+
+  // Estados para editar nombre/teléfono del cliente seleccionado
+  const [editandoCliente, setEditandoCliente] = useState(false);
+  const [nombreEdit, setNombreEdit] = useState('');
+  const [telefonoEdit, setTelefonoEdit] = useState('');
+
+  // Estados para fusionar
+  const [modoFusion, setModoFusion] = useState(false); // seleccionando 2do cliente
+  const [clienteAFusionar, setClienteAFusionar] = useState(null); // el 2do elegido
+  const [confirmFusion, setConfirmFusion] = useState(false);
+  const [nombreFinal, setNombreFinal] = useState('');
+  const [telefonoFinal, setTelefonoFinal] = useState('');
 
   const filtrados = useMemo(() => {
     if (!busqueda.trim()) return clientes;
@@ -2857,6 +3033,152 @@ function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPe
     return clientes.filter(c => c.nombre.toLowerCase().includes(q) || c.telefono.includes(q));
   }, [clientes, busqueda]);
 
+  // Cuando volvemos a la lista resincronizamos el seleccionado con los datos frescos
+  useEffect(() => {
+    if (seleccionado) {
+      const actualizado = clientes.find(c => c.id === seleccionado.id);
+      if (actualizado) setSeleccionado(actualizado);
+      else setSeleccionado(null);
+    }
+  }, [clientes]);
+
+  const abrirEdicion = () => {
+    setNombreEdit(seleccionado.nombre);
+    setTelefonoEdit(seleccionado.telefono || '');
+    setEditandoCliente(true);
+  };
+
+  const guardarEdicion = () => {
+    if (!nombreEdit.trim()) return;
+    renombrarCliente(seleccionado.nombre, nombreEdit.trim(), telefonoEdit.trim());
+    setEditandoCliente(false);
+  };
+
+  const iniciarFusion = () => {
+    setBusqueda('');
+    setModoFusion(true);
+  };
+
+  const elegirSegundoCliente = (c) => {
+    setClienteAFusionar(c);
+    setNombreFinal(seleccionado.nombre);
+    setTelefonoFinal(seleccionado.telefono || c.telefono || '');
+    setConfirmFusion(true);
+    setModoFusion(false);
+  };
+
+  const ejecutarFusion = () => {
+    // Fusionar: todos los pedidos del 2do cliente pasan al 1ro con el nombre/tel final
+    fusionarClientes(clienteAFusionar.nombre, nombreFinal.trim(), telefonoFinal.trim());
+    // Si el nombre del 1ro también cambió, renombrarlo también
+    if (nombreFinal.trim() !== seleccionado.nombre || telefonoFinal.trim() !== seleccionado.telefono) {
+      renombrarCliente(seleccionado.nombre, nombreFinal.trim(), telefonoFinal.trim());
+    }
+    setConfirmFusion(false);
+    setClienteAFusionar(null);
+    setSeleccionado(null);
+  };
+
+  // ——— MODO: Seleccionando 2do cliente para fusionar ———
+  if (modoFusion) {
+    const otrosClientes = clientes.filter(c => c.id !== seleccionado?.id);
+    return (
+      <div style={{ paddingBottom: 110 }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '16px',
+          background: 'var(--superficie)', borderBottom: '1px solid var(--borde)',
+          paddingTop: 'calc(16px + env(safe-area-inset-top))',
+        }}>
+          <button onClick={() => setModoFusion(false)} style={{ border: 'none', background: 'var(--masa-2)', borderRadius: 12, width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--carbon)' }}>
+            <Icon name="volver" size={20} />
+          </button>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 17, color: 'var(--carbon)' }}>¿Con quién fusionás?</h2>
+            <div style={{ fontSize: 12.5, color: 'var(--carbon-35)' }}>Elegí el duplicado de <strong>{seleccionado?.nombre}</strong></div>
+          </div>
+        </div>
+        <div style={{ padding: '12px 18px' }}>
+          <input value={busqueda} onChange={e => setBusqueda(e.target.value)} placeholder="Buscar cliente…" style={{ ...inputEstilo, marginBottom: 12 }} />
+          {otrosClientes.filter(c => !busqueda.trim() || c.nombre.toLowerCase().includes(busqueda.toLowerCase()) || c.telefono.includes(busqueda)).map(c => (
+            <button key={c.id} onClick={() => elegirSegundoCliente(c)} style={{
+              width: '100%', background: 'var(--superficie)', border: '1px solid var(--borde)',
+              borderRadius: 14, padding: '13px 16px', marginBottom: 8, textAlign: 'left',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 15, color: 'var(--carbon)' }}>{c.nombre}</div>
+                <div style={{ fontSize: 12.5, color: 'var(--carbon-35)', marginTop: 2 }}>{c.telefono || 'Sin teléfono'} · {c.pedidos.length} pedido{c.pedidos.length !== 1 ? 's' : ''}</div>
+              </div>
+              <Icon name="flecha" size={18} style={{ color: 'var(--carbon-35)', flexShrink: 0 }} />
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // ——— MODO: Confirmación de fusión ———
+  if (confirmFusion && clienteAFusionar) {
+    const totalPedidos = (historialCliente(seleccionado?.nombre)?.pedidos.length || 0) +
+                         (historialCliente(clienteAFusionar.nombre)?.pedidos.length || 0);
+    return (
+      <div style={{ paddingBottom: 110 }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '16px',
+          background: 'var(--superficie)', borderBottom: '1px solid var(--borde)',
+          paddingTop: 'calc(16px + env(safe-area-inset-top))',
+        }}>
+          <button onClick={() => { setConfirmFusion(false); setClienteAFusionar(null); }} style={{ border: 'none', background: 'var(--masa-2)', borderRadius: 12, width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--carbon)' }}>
+            <Icon name="volver" size={20} />
+          </button>
+          <h2 style={{ margin: 0, fontSize: 17, color: 'var(--carbon)' }}>Confirmar fusión</h2>
+        </div>
+
+        <div style={{ padding: '16px 18px' }}>
+          {/* Clientes que se fusionan */}
+          <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 14, marginBottom: 14 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Se van a unificar</div>
+            {[seleccionado, clienteAFusionar].map((c, i) => (
+              <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 0', borderTop: i === 0 ? 'none' : '1px solid var(--masa-2)' }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14.5, color: 'var(--carbon)' }}>{c.nombre}</div>
+                  <div style={{ fontSize: 12, color: 'var(--carbon-35)' }}>{c.telefono || 'Sin tel'} · {c.pedidos.length} pedido{c.pedidos.length !== 1 ? 's' : ''}</div>
+                </div>
+              </div>
+            ))}
+            <div style={{ marginTop: 10, padding: '8px 10px', background: 'var(--oliva-bg)', borderRadius: 10, fontSize: 13, color: 'var(--oliva)', fontWeight: 700 }}>
+              Total unificado: {totalPedidos} pedidos
+            </div>
+          </div>
+
+          {/* Nombre y teléfono final */}
+          <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Datos del cliente unificado</div>
+          <div style={{ marginBottom: 10 }}>
+            <CampoLabel>Nombre definitivo</CampoLabel>
+            <input value={nombreFinal} onChange={e => setNombreFinal(e.target.value)} style={inputEstilo} placeholder="Nombre" />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <CampoLabel>Teléfono / WhatsApp</CampoLabel>
+            <input value={telefonoFinal} onChange={e => setTelefonoFinal(e.target.value)} style={inputEstilo} placeholder="+54 9 ..." inputMode="tel" />
+          </div>
+
+          <div style={{ background: 'var(--rojo-alerta-bg)', borderRadius: 12, padding: '10px 14px', marginBottom: 16, fontSize: 13, color: 'var(--rojo-alerta)', fontWeight: 600 }}>
+            ⚠️ Esta acción no se puede deshacer. Todos los pedidos van a quedar bajo el nombre que elijas arriba.
+          </div>
+
+          <button
+            onClick={ejecutarFusion}
+            disabled={!nombreFinal.trim()}
+            style={{ width: '100%', padding: '15px', borderRadius: 14, border: 'none', background: nombreFinal.trim() ? 'var(--terracota)' : 'var(--gris-bg)', color: nombreFinal.trim() ? '#fff' : 'var(--carbon-35)', fontWeight: 800, fontSize: 15.5, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+          >
+            <Icon name="check" size={18} /> Fusionar clientes
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ——— MODO: Detalle de un cliente ———
   if (seleccionado) {
     const hist = historialCliente(seleccionado.nombre);
     const promedio = hist?.pedidos.length > 0 ? Math.round(hist.totalGastado / hist.pedidos.length) : 0;
@@ -2870,19 +3192,43 @@ function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPe
 
     return (
       <div style={{ paddingBottom: 120 }}>
+        {/* Header con volver, nombre y botón editar */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10, padding: '16px',
           background: 'var(--superficie)', borderBottom: '1px solid var(--borde)',
           paddingTop: 'calc(16px + env(safe-area-inset-top))',
         }}>
-          <button onClick={() => setSeleccionado(null)} style={{ border: 'none', background: 'var(--masa-2)', borderRadius: 12, width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--carbon)' }}>
+          <button onClick={() => { setSeleccionado(null); setEditandoCliente(false); }} style={{ border: 'none', background: 'var(--masa-2)', borderRadius: 12, width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--carbon)' }}>
             <Icon name="volver" size={20} />
           </button>
-          <h2 style={{ margin: 0, fontSize: 18, color: 'var(--carbon)' }}>{seleccionado.nombre}</h2>
+          <h2 style={{ margin: 0, fontSize: 18, color: 'var(--carbon)', flex: 1 }}>{seleccionado.nombre}</h2>
+          <button onClick={abrirEdicion} style={{ border: 'none', background: 'var(--masa-2)', borderRadius: 12, width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--terracota)' }}>
+            <Icon name="editar" size={17} />
+          </button>
         </div>
 
         <div style={{ padding: '16px 18px' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 16 }}>
+
+          {/* Edición inline de nombre/teléfono */}
+          {editandoCliente && (
+            <div style={{ background: 'var(--masa-2)', border: '1px solid var(--borde)', borderRadius: 16, padding: 14, marginBottom: 14 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Editar datos del cliente</div>
+              <input value={nombreEdit} onChange={e => setNombreEdit(e.target.value)} style={{ ...inputEstilo, marginBottom: 8 }} placeholder="Nombre" />
+              <input value={telefonoEdit} onChange={e => setTelefonoEdit(e.target.value)} style={{ ...inputEstilo, marginBottom: 10 }} placeholder="Teléfono / WhatsApp" inputMode="tel" />
+              <div style={{ fontSize: 12, color: 'var(--gris)', marginBottom: 10, lineHeight: 1.5 }}>
+                Esto actualiza el nombre y teléfono en <strong>todos</strong> los pedidos de este cliente.
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => setEditandoCliente(false)} style={{ flex: 1, padding: '11px', borderRadius: 12, border: '1px solid var(--borde)', background: 'var(--superficie)', color: 'var(--carbon-60)', fontWeight: 700 }}>Cancelar</button>
+                <button onClick={guardarEdicion} disabled={!nombreEdit.trim()} style={{ flex: 2, padding: '11px', borderRadius: 12, border: 'none', background: nombreEdit.trim() ? 'var(--terracota)' : 'var(--gris-bg)', color: nombreEdit.trim() ? '#fff' : 'var(--carbon-35)', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                  <Icon name="check" size={15} /> Guardar y actualizar todos
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Stats */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 14 }}>
             {[
               { label: 'Pedidos', valor: hist?.pedidos.length || 0, color: 'var(--terracota)' },
               { label: 'Total', valor: formatoMoneda(hist?.totalGastado || 0), color: 'var(--oliva)' },
@@ -2895,6 +3241,7 @@ function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPe
             ))}
           </div>
 
+          {/* Favoritas */}
           {favs.length > 0 && (
             <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 14, marginBottom: 14 }}>
               <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Sus favoritas</div>
@@ -2909,6 +3256,7 @@ function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPe
             </div>
           )}
 
+          {/* Historial de pedidos */}
           <div style={{ fontSize: 11.5, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Historial</div>
           {(hist?.pedidos || []).map(p => (
             <div key={p.id} style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 14, padding: '12px 14px', marginBottom: 8 }}>
@@ -2923,17 +3271,26 @@ function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPe
             </div>
           ))}
 
+          {/* Acciones */}
           <button
             onClick={() => onNuevoPedidoParaCliente(seleccionado)}
-            style={{ width: '100%', padding: '15px', borderRadius: 16, border: 'none', background: 'var(--terracota)', color: '#fff', fontWeight: 800, fontSize: 15.5, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 8 }}
+            style={{ width: '100%', padding: '14px', borderRadius: 14, border: 'none', background: 'var(--terracota)', color: '#fff', fontWeight: 800, fontSize: 15, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 8, marginBottom: 10 }}
           >
-            <Icon name="mas" size={18} /> Nuevo pedido para {seleccionado.nombre.split(' ')[0]}
+            <Icon name="mas" size={17} /> Nuevo pedido para {seleccionado.nombre.split(' ')[0]}
+          </button>
+
+          <button
+            onClick={iniciarFusion}
+            style={{ width: '100%', padding: '13px', borderRadius: 14, border: '1px solid var(--borde)', background: 'var(--superficie)', color: 'var(--carbon-60)', fontWeight: 700, fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7 }}
+          >
+            <Icon name="clientes" size={16} /> Fusionar con otro cliente
           </button>
         </div>
       </div>
     );
   }
 
+  // ——— MODO: Lista de clientes ———
   return (
     <div style={{ paddingBottom: 110 }}>
       <Encabezado titulo="Clientes" subtitulo={`${clientes.length} registrados`} />
@@ -2945,7 +3302,7 @@ function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPe
           <EstadoVacio icono="clientes" titulo="Sin clientes todavía" texto="Aparecen automáticamente cuando cargás pedidos." />
         ) : (
           filtrados.map(c => (
-            <button key={c.id} onClick={() => setSeleccionado(c)} style={{
+            <button key={c.id} onClick={() => { setSeleccionado(c); setEditandoCliente(false); }} style={{
               width: '100%', background: 'var(--superficie)', border: '1px solid var(--borde)',
               borderRadius: 16, padding: '13px 16px', marginBottom: 10, textAlign: 'left',
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -2955,6 +3312,7 @@ function PantallaClientesTab({ clientes, historialCliente, variedades, onNuevoPe
                 <div style={{ fontSize: 12.5, color: 'var(--carbon-35)', marginTop: 2 }}>
                   {c.pedidos.length} pedido{c.pedidos.length !== 1 ? 's' : ''} · último {formatoFechaCorta(c.ultimoPedido)}
                 </div>
+                {c.telefono && <div style={{ fontSize: 12, color: 'var(--carbon-35)', marginTop: 1 }}>{c.telefono}</div>}
               </div>
               <div style={{ textAlign: 'right', flexShrink: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}>
@@ -3183,7 +3541,8 @@ function GestionVariedades({ variedades, crearVariedad, actualizarVariedad, elim
             if (items.length === 0) return null;
             return (
               <div key={cat.id} style={{ marginBottom: 18 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--carbon-35)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Icon name={cat.id === 'focaccia' ? 'focaccia' : 'pizza'} size={13} />
                   {cat.label}s ({items.length})
                 </div>
                 <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, overflow: 'hidden' }}>
@@ -3246,7 +3605,7 @@ function GestionVariedades({ variedades, crearVariedad, actualizarVariedad, elim
 }
 
 function App() {
-  const { pedidos, crearPedido, actualizarPedido, eliminarPedido } = usePedidos();
+  const { pedidos, crearPedido, actualizarPedido, eliminarPedido, fusionarClientes, renombrarCliente } = usePedidos();
   const { variedades, crearVariedad, actualizarVariedad, eliminarVariedad } = useVariedades();
   const { clientes, sugerirClientes, historialCliente } = useClientes(pedidos);
 
@@ -3329,6 +3688,8 @@ function App() {
           historialCliente={historialCliente}
           variedades={variedades}
           onNuevoPedidoParaCliente={(c) => { abrirNuevo(c); setVista('pedidos'); }}
+          fusionarClientes={fusionarClientes}
+          renombrarCliente={renombrarCliente}
         />
       )}
 
@@ -3346,6 +3707,7 @@ function App() {
           onAbrirVariedades={() => setVariedadesAbierto(true)}
           sugerirClientes={sugerirClientes}
           historialCliente={historialCliente}
+          renombrarCliente={renombrarCliente}
         />
       )}
 
