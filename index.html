@@ -6,13 +6,13 @@
 <meta name="theme-color" content="#17120E" />
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Horno &amp; Pedido">
-<meta name="application-name" content="Horno &amp; Pedido">
+<meta name="apple-mobile-web-app-title" content="Iparra Pizza">
+<meta name="application-name" content="Iparra Pizza">
 <link rel="manifest" href="./manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
 <link rel="icon" type="image/png" sizes="512x512" href="./icon-512.png">
 <link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png">
-<title>Horno&nbsp;&amp; Pedido — Gestión de Pizzería</title>
+<title>Iparra Pizza &amp; Focaccia — Pedidos</title>
 <style>
 :root{
   /* Fondos */
@@ -518,6 +518,37 @@ function formatoFechaLarga(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   const fecha = new Date(y, m - 1, d);
   return `${dias[fecha.getDay()]} ${d}/${m}`;
+}
+
+// ---- Categoría y ganancia por pedido ----
+function categoriaDeItem(it, variedades) {
+  const v = variedades.find(s => s.id === it.saborId);
+  return (v && v.categoria) || 'pizza';
+}
+
+// Costo unitario de un ítem: usa el costo "congelado" al guardar el pedido (costoUnit)
+// y, si no existe, el costo actual de la variedad. Devuelve 0 si no hay costo cargado.
+function costoUnitDeItem(it, variedades) {
+  const snap = Number(it.costoUnit);
+  if (snap > 0) return snap;
+  const v = variedades.find(s => s.id === it.saborId);
+  return Number(v?.costo) > 0 ? Number(v.costo) : 0;
+}
+
+// Ganancia = total cobrado por el pedido - costo de sus variedades.
+// Solo es "completa" si TODAS las variedades del pedido tienen costo cargado.
+function calcularGananciaPedido(pedido, variedades) {
+  const items = pedido.items || [];
+  const total = Number(pedido.total) || 0;
+  let costo = 0, completo = items.length > 0;
+  items.forEach(it => {
+    const cu = costoUnitDeItem(it, variedades);
+    if (cu > 0) costo += cu * (Number(it.cantidad) || 0);
+    else completo = false;
+  });
+  if (!completo) return { completo: false, total, costo: null, ganancia: null, margen: null };
+  const ganancia = total - costo;
+  return { completo: true, total, costo, ganancia, margen: total > 0 ? Math.round((ganancia / total) * 100) : 0 };
 }
 
 function calcularTotalPizzas(items) {
@@ -1795,7 +1826,9 @@ function FormularioPedido({ pedidoExistente, prefill, onGuardar, onCancelar, onE
       direccion: tipoEntrega === 'domicilio' ? direccion.trim() : '',
       repartidor: tipoEntrega === 'domicilio' ? repartidor.trim() : '',
       notas: notas.trim(),
-      items,
+      // Se "congela" el costo vigente de cada variedad: si después cambia el costo,
+      // la ganancia de pedidos ya cargados no se altera
+      items: items.map(it => ({ ...it, costoUnit: costoUnitDeItem(it, variedades) })),
       total: totalFinal,
       estadoPago,
       estadoCocina: pedidoExistente?.estadoCocina || 'pendiente',
@@ -2338,22 +2371,75 @@ function DetallePedido({ pedido, onCerrar, onEditar, actualizarPedido, variedade
           )}
         </div>
 
-        <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 16, marginBottom: 14 }}>
-          <div style={{ fontWeight: 800, fontSize: 14.5, marginBottom: 10, color: 'var(--carbon)' }}>Pizzas pedidas</div>
-          {(pedido.items || []).map((it, i) => {
-            const s = variedades.find(s => s.id === it.saborId);
-            return (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', fontSize: 14.5, color: 'var(--carbon-60)' }}>
-                <span>{it.cantidad}× {s ? s.nombre : it.saborId}</span>
-                <span style={{ fontWeight: 700, color: 'var(--carbon)' }}>{formatoMoneda((s?.precio || 0) * it.cantidad)}</span>
+        {/* Items agrupados por categoría: "Pizzas pedidas" / "Focaccias pedidas" */}
+        {(() => {
+          const gp = calcularGananciaPedido(pedido, variedades);
+          const grupos = CATEGORIAS_VARIEDAD
+            .map(cat => ({
+              cat,
+              items: (pedido.items || []).filter(it => categoriaDeItem(it, variedades) === cat.id),
+            }))
+            .filter(g => g.items.length > 0);
+          return (
+            <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 16, marginBottom: 14 }}>
+              {grupos.map((g, gi) => {
+                const unidades = g.items.reduce((a, it) => a + (Number(it.cantidad) || 0), 0);
+                return (
+                  <div key={g.cat.id} style={{ marginTop: gi === 0 ? 0 : 14, paddingTop: gi === 0 ? 0 : 14, borderTop: gi === 0 ? 'none' : '1px solid var(--masa-2)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 800, fontSize: 14.5, color: 'var(--carbon)' }}>
+                        <Icon name={g.cat.id === 'focaccia' ? 'focaccia' : 'pizza'} size={16} style={{ color: 'var(--terracota)' }} />
+                        {g.cat.label}s pedidas
+                      </div>
+                      <span style={{ fontSize: 12.5, fontWeight: 800, color: 'var(--terracota)', background: 'var(--chip-activo-bg)', borderRadius: 999, padding: '3px 10px' }}>
+                        {unidades} u.
+                      </span>
+                    </div>
+                    {g.items.map((it, i) => {
+                      const s = variedades.find(v => v.id === it.saborId);
+                      const precio = Number(s?.precio) || 0;
+                      return (
+                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', fontSize: 14.5, color: 'var(--carbon-60)' }}>
+                          <span>
+                            {it.cantidad}× {s ? s.nombre : it.saborId}
+                            {it.cantidad > 1 && precio > 0 && (
+                              <span style={{ fontSize: 12, color: 'var(--carbon-35)' }}> ({formatoMoneda(precio)} c/u)</span>
+                            )}
+                          </span>
+                          <span style={{ fontWeight: 700, color: 'var(--carbon)' }}>{formatoMoneda(precio * it.cantidad)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--masa-2)' }}>
+                <span style={{ fontWeight: 800, color: 'var(--carbon)' }}>Total</span>
+                <span className="display" style={{ fontWeight: 800, color: 'var(--terracota)', fontSize: 18 }}>{formatoMoneda(pedido.total)}</span>
               </div>
-            );
-          })}
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--masa-2)' }}>
-            <span style={{ fontWeight: 800, color: 'var(--carbon)' }}>Total</span>
-            <span className="display" style={{ fontWeight: 800, color: 'var(--terracota)', fontSize: 18 }}>{formatoMoneda(pedido.total)}</span>
-          </div>
-        </div>
+
+              {/* Costo y ganancia del pedido */}
+              {gp.completo ? (
+                <div style={{ marginTop: 10, background: 'var(--oliva-bg)', borderRadius: 12, padding: '10px 12px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--carbon-60)', fontWeight: 600 }}>
+                    <span>Costo de producción</span><span>{formatoMoneda(gp.costo)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 5 }}>
+                    <span style={{ fontWeight: 800, color: 'var(--oliva)', fontSize: 14 }}>Ganancia</span>
+                    <span style={{ fontWeight: 800, color: 'var(--oliva)', fontSize: 15 }}>
+                      {formatoMoneda(gp.ganancia)} <span style={{ fontSize: 12, fontWeight: 700 }}>· {gp.margen}% margen</span>
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--carbon-35)', lineHeight: 1.45 }}>
+                  Para ver la ganancia de este pedido, cargá el costo de todas sus variedades en Variedades.
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {pedido.notas && (
           <div style={{ background: 'var(--nota-bg)', borderRadius: 16, padding: 16, marginBottom: 14, color: 'var(--terracota)' }}>
@@ -2437,8 +2523,11 @@ function pedidosEntreFechas(pedidos, desde, hasta) {
 
 function calcularStats(lista, variedades) {
   let totalVentas = 0, cobrado = 0, pendienteCobrar = 0, efectivo = 0, transferencia = 0;
-  let costoTotal = 0, tieneCostos = false;
+  let costoTotal = 0, ganancia = 0, ventasConCosto = 0, pedidosSinCosto = 0;
   const rankingMap = {};
+  const totalPorCategoria = {};
+  CATEGORIAS_VARIEDAD.forEach(c => { totalPorCategoria[c.id] = 0; });
+  const gananciaPedidos = [];
 
   lista.forEach(p => {
     const total = Number(p.total) || 0;
@@ -2448,21 +2537,39 @@ function calcularStats(lista, variedades) {
     pendienteCobrar += ep.pendiente;
     efectivo += ep.efectivo;
     transferencia += ep.transferencia;
+
     (p.items || []).forEach(it => {
       const cant = Number(it.cantidad) || 0;
       rankingMap[it.saborId] = (rankingMap[it.saborId] || 0) + cant;
-      const v = variedades.find(s => s.id === it.saborId);
-      if (v && v.costo > 0) { costoTotal += v.costo * cant; tieneCostos = true; }
+      const cat = categoriaDeItem(it, variedades);
+      totalPorCategoria[cat] = (totalPorCategoria[cat] || 0) + cant;
     });
+
+    // Ganancia: solo pedidos con costo cargado en todas sus variedades
+    const g = calcularGananciaPedido(p, variedades);
+    if (g.completo) {
+      costoTotal += g.costo;
+      ganancia += g.ganancia;
+      ventasConCosto += g.total;
+    } else {
+      pedidosSinCosto += 1;
+    }
+    gananciaPedidos.push({ pedido: p, ...g });
   });
 
   const ranking = variedades
     .map(s => ({ ...s, cantidad: rankingMap[s.id] || 0 }))
     .sort((a, b) => b.cantidad - a.cantidad);
 
-  const ganancia = tieneCostos ? totalVentas - costoTotal : null;
+  const tieneCostos = ventasConCosto > 0;
+  const margen = ventasConCosto > 0 ? Math.round((ganancia / ventasConCosto) * 100) : 0;
+  const totalUnidades = Object.values(totalPorCategoria).reduce((a, b) => a + b, 0);
 
-  return { totalVentas, cobrado, pendienteCobrar, efectivo, transferencia, ranking, cantidad: lista.length, costoTotal, ganancia, tieneCostos };
+  return {
+    totalVentas, cobrado, pendienteCobrar, efectivo, transferencia, ranking, cantidad: lista.length,
+    costoTotal, ganancia: tieneCostos ? ganancia : null, ventasConCosto, pedidosSinCosto, tieneCostos, margen,
+    totalPorCategoria, totalUnidades, gananciaPedidos,
+  };
 }
 
 /* =========================================================
@@ -2604,6 +2711,11 @@ function ComparadorPeriodos({ pedidos, variedades }) {
             <FilaComparacion label="A definir" valA={statsA.pendienteCobrar} valB={statsB.pendienteCobrar} />
             <FilaComparacion label="Efectivo" valA={statsA.efectivo} valB={statsB.efectivo} />
             <FilaComparacion label="Transferencia" valA={statsA.transferencia} valB={statsB.transferencia} />
+            {(statsA.tieneCostos || statsB.tieneCostos) && (
+              <FilaComparacion label="Ganancia" valA={statsA.ganancia || 0} valB={statsB.ganancia || 0} />
+            )}
+            <FilaComparacion label="Pizzas (u.)" valA={statsA.totalPorCategoria.pizza || 0} valB={statsB.totalPorCategoria.pizza || 0} formato="num" />
+            <FilaComparacion label="Focaccias (u.)" valA={statsA.totalPorCategoria.focaccia || 0} valB={statsB.totalPorCategoria.focaccia || 0} formato="num" />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: '11px 0', alignItems: 'center', gap: 4 }}>
               <div style={{ fontSize: 12.5, color: 'var(--carbon-60)', fontWeight: 600 }}>Pedidos</div>
               <div style={{ textAlign: 'center', fontWeight: 800, fontSize: 14, color: 'var(--terracota)' }}>{statsA.cantidad}</div>
@@ -2654,6 +2766,7 @@ function ComparadorPeriodos({ pedidos, variedades }) {
 function Balances({ pedidos, variedades }) {
   const [modo, setModo] = useState('resumen'); // 'resumen' | 'comparar'
   const [rango, setRango] = useState('hoy');
+  const [verPorPedido, setVerPorPedido] = useState(false);
 
   const filtrados = useMemo(() => pedidos.filter(p => pedidoEnRango(p, rango)), [pedidos, rango]);
   const stats = useMemo(() => calcularStats(filtrados, variedades), [filtrados, variedades]);
@@ -2714,6 +2827,17 @@ function Balances({ pedidos, variedades }) {
               <div style={{ fontSize: 13, fontWeight: 700, opacity: 0.9 }}>Balance total de ventas</div>
               <div className="display" style={{ fontSize: 34, marginTop: 6 }}>{formatoMoneda(stats.totalVentas)}</div>
               <div style={{ fontSize: 12.5, opacity: 0.85, marginTop: 4 }}>{filtrados.length} pedido{filtrados.length !== 1 ? 's' : ''} en el período</div>
+              {stats.tieneCostos && (
+                <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid rgba(255,255,255,.28)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, opacity: 0.9 }}>Ganancia</div>
+                    <div className="display" style={{ fontSize: 26, marginTop: 2 }}>{formatoMoneda(stats.ganancia)}</div>
+                  </div>
+                  <div style={{ background: 'rgba(255,255,255,.22)', borderRadius: 999, padding: '5px 13px', fontSize: 13, fontWeight: 800 }}>
+                    {stats.margen}% margen
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Cobrado / pendiente */}
@@ -2730,16 +2854,16 @@ function Balances({ pedidos, variedades }) {
               </div>
             </div>
 
-            {/* Ganancia bruta (solo si hay costos cargados) */}
-            {stats.tieneCostos && (
+            {/* Ganancia del período + detalle por pedido */}
+            {stats.tieneCostos ? (
               <div style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 16, marginBottom: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 800, fontSize: 14.5, color: 'var(--carbon)', marginBottom: 10 }}>
-                  <Icon name="tendencia" size={17} /> Ganancia bruta estimada
+                  <Icon name="tendencia" size={17} /> Ganancia del período
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
                   <div style={{ textAlign: 'center' }}>
                     <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>VENTAS</div>
-                    <div style={{ fontWeight: 800, fontSize: 15, color: 'var(--carbon)' }}>{formatoMoneda(stats.totalVentas)}</div>
+                    <div style={{ fontWeight: 800, fontSize: 15, color: 'var(--carbon)' }}>{formatoMoneda(stats.ventasConCosto)}</div>
                   </div>
                   <div style={{ textAlign: 'center' }}>
                     <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginBottom: 4 }}>COSTO</div>
@@ -2753,16 +2877,56 @@ function Balances({ pedidos, variedades }) {
                 <div style={{ marginTop: 10, height: 8, borderRadius: 999, background: 'var(--masa-2)', overflow: 'hidden' }}>
                   <div style={{
                     height: '100%', borderRadius: 999,
-                    width: stats.totalVentas > 0 ? `${Math.round((stats.ganancia / stats.totalVentas) * 100)}%` : '0%',
+                    width: `${Math.max(0, Math.min(100, stats.margen))}%`,
                     background: 'linear-gradient(90deg, var(--queso-d), var(--oliva))',
                   }} />
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--carbon-35)', marginTop: 6, fontWeight: 700, textAlign: 'right' }}>
-                  {stats.totalVentas > 0 ? Math.round((stats.ganancia / stats.totalVentas) * 100) : 0}% margen
+                  {stats.margen}% margen
                 </div>
-                <div style={{ fontSize: 11.5, color: 'var(--carbon-35)', marginTop: 4 }}>
-                  * Basado en costos cargados en Variedades. Cargá el costo de producción de cada variedad para ver esto.
-                </div>
+                {stats.pedidosSinCosto > 0 && (
+                  <div style={{ fontSize: 12, color: 'var(--queso-d)', marginTop: 6, lineHeight: 1.45, fontWeight: 600 }}>
+                    {stats.pedidosSinCosto} pedido{stats.pedidosSinCosto !== 1 ? 's' : ''} sin costo cargado en alguna variedad: no se incluye{stats.pedidosSinCosto !== 1 ? 'n' : ''} en la ganancia.
+                  </div>
+                )}
+
+                <button
+                  onClick={() => setVerPorPedido(v => !v)}
+                  style={{ width: '100%', marginTop: 12, padding: '11px', borderRadius: 12, border: '1px solid var(--borde)', background: 'var(--masa-2)', color: 'var(--carbon-60)', fontWeight: 700, fontSize: 13.5 }}
+                >
+                  {verPorPedido ? 'Ocultar ganancia por pedido' : 'Ver ganancia por pedido'}
+                </button>
+
+                {verPorPedido && (
+                  <div style={{ marginTop: 10 }}>
+                    {[...stats.gananciaPedidos]
+                      .sort((a, b) => (b.pedido.fecha || '').localeCompare(a.pedido.fecha || '') || (b.pedido.hora || '').localeCompare(a.pedido.hora || ''))
+                      .map(g => (
+                        <div key={g.pedido.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '10px 0', borderTop: '1px solid var(--masa-2)' }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--carbon)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.pedido.cliente}</div>
+                            <div style={{ fontSize: 12, color: 'var(--carbon-35)', marginTop: 1 }}>
+                              {formatoFechaCorta(g.pedido.fecha)} · vendido {formatoMoneda(g.total)}
+                            </div>
+                          </div>
+                          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                            {g.completo ? (
+                              <>
+                                <div style={{ fontWeight: 800, fontSize: 14.5, color: g.ganancia >= 0 ? 'var(--oliva)' : 'var(--rojo-alerta)' }}>{formatoMoneda(g.ganancia)}</div>
+                                <div style={{ fontSize: 11.5, color: 'var(--carbon-35)', fontWeight: 700 }}>{g.margen}% margen</div>
+                              </>
+                            ) : (
+                              <div style={{ fontSize: 12, color: 'var(--carbon-35)', fontWeight: 700 }}>Sin costo</div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ background: 'var(--superficie)', border: '1px dashed var(--borde)', borderRadius: 16, padding: 16, marginBottom: 12, fontSize: 13.5, color: 'var(--carbon-60)', lineHeight: 1.5 }}>
+                <strong style={{ color: 'var(--carbon)' }}>Ganancia:</strong> cargá el costo de tus pizzas y focaccias en <strong>Variedades</strong> (editando cada una) y acá vas a ver la ganancia de cada pedido y del período.
               </div>
             )}
 
@@ -2781,15 +2945,37 @@ function Balances({ pedidos, variedades }) {
               </div>
             </div>
 
+            {/* Totalizador general de unidades vendidas */}
+            <div style={{ display: 'grid', gridTemplateColumns: `repeat(${CATEGORIAS_VARIEDAD.length + 1}, 1fr)`, gap: 10, marginBottom: 12 }}>
+              {CATEGORIAS_VARIEDAD.map(cat => (
+                <div key={cat.id} style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 14, padding: '12px 8px', textAlign: 'center' }}>
+                  <Icon name={cat.id === 'focaccia' ? 'focaccia' : 'pizza'} size={16} style={{ color: 'var(--terracota)' }} />
+                  <div className="display" style={{ fontSize: 22, color: 'var(--carbon)', marginTop: 4, lineHeight: 1 }}>{stats.totalPorCategoria[cat.id] || 0}</div>
+                  <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginTop: 4 }}>{cat.label}s vendidas</div>
+                </div>
+              ))}
+              <div style={{ background: 'var(--chip-activo-bg)', border: '1px solid var(--borde)', borderRadius: 14, padding: '12px 8px', textAlign: 'center' }}>
+                <Icon name="estrella" size={16} style={{ color: 'var(--queso)' }} />
+                <div className="display" style={{ fontSize: 22, color: 'var(--terracota)', marginTop: 4, lineHeight: 1 }}>{stats.totalUnidades}</div>
+                <div style={{ fontSize: 11, color: 'var(--carbon-35)', fontWeight: 700, marginTop: 4 }}>Total unidades</div>
+              </div>
+            </div>
+
             {/* Ranking por categoría */}
             {CATEGORIAS_VARIEDAD.map(cat => {
               const itemsCat = stats.ranking.filter(r => (r.categoria || 'pizza') === cat.id);
               const maxCat = Math.max(1, ...itemsCat.map(r => r.cantidad));
+              const totalCat = stats.totalPorCategoria[cat.id] || 0;
               if (itemsCat.length === 0) return null;
               return (
                 <div key={cat.id} style={{ background: 'var(--superficie)', border: '1px solid var(--borde)', borderRadius: 16, padding: 16, marginBottom: 12 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 800, fontSize: 14.5, color: 'var(--carbon)', marginBottom: 14 }}>
-                    <Icon name={cat.id === 'focaccia' ? 'focaccia' : 'pizza'} size={17} /> Ránking — {cat.label}s más vendidas
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 14 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 800, fontSize: 14.5, color: 'var(--carbon)' }}>
+                      <Icon name={cat.id === 'focaccia' ? 'focaccia' : 'pizza'} size={17} /> Ránking — {cat.label}s
+                    </div>
+                    <span style={{ flexShrink: 0, fontSize: 12.5, fontWeight: 800, color: 'var(--terracota)', background: 'var(--chip-activo-bg)', borderRadius: 999, padding: '4px 11px' }}>
+                      Total {totalCat} u.
+                    </span>
                   </div>
                   {itemsCat.every(r => r.cantidad === 0) ? (
                     <div style={{ fontSize: 13.5, color: 'var(--carbon-35)', textAlign: 'center', padding: '14px 0' }}>
@@ -2800,7 +2986,10 @@ function Balances({ pedidos, variedades }) {
                       <div key={r.id} style={{ marginBottom: i === itemsCat.length - 1 ? 0 : 13 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5, fontSize: 13.5 }}>
                           <span style={{ fontWeight: 700, color: 'var(--carbon)' }}>{r.nombre}</span>
-                          <span style={{ fontWeight: 800, color: 'var(--terracota)' }}>{r.cantidad}</span>
+                          <span style={{ fontWeight: 800, color: 'var(--terracota)' }}>
+                            {r.cantidad}
+                            {totalCat > 0 && <span style={{ fontSize: 11.5, color: 'var(--carbon-35)', fontWeight: 700 }}> · {Math.round((r.cantidad / totalCat) * 100)}%</span>}
+                          </span>
                         </div>
                         <div style={{ height: 10, borderRadius: 999, background: 'var(--masa-2)', overflow: 'hidden' }}>
                           <div style={{
