@@ -3942,5 +3942,50 @@ root.render(<App />);
 })();
 </script>
 
+
+<!-- ===== Exportar datos (backup / migración a Pizza Calc) ===== -->
+<button id="btn-exportar-datos" type="button" title="Descargar pedidos, clientes y variedades en un archivo .json"
+  style="position:fixed;left:12px;bottom:12px;z-index:99999;background:#1c1c21;color:#e8a020;border:1px solid rgba(232,160,32,.45);border-radius:10px;padding:8px 12px;font:600 12px system-ui,Arial,sans-serif;cursor:pointer;opacity:.9;box-shadow:0 4px 14px rgba(0,0,0,.5);">
+  ⬇ Exportar datos
+</button>
+<script>
+(function () {
+  function leer(clave) {
+    try { return JSON.parse(localStorage.getItem(clave) || '[]'); } catch (e) { return []; }
+  }
+  document.getElementById('btn-exportar-datos').addEventListener('click', function () {
+    var datos = {
+      app: 'agenda-pedidos',
+      exportadoEn: new Date().toISOString(),
+      pedidos: leer('horno_pedidos_v1'),
+      clientes: leer('horno_clientes_v1'),
+      variedades: leer('horno_variedades_v1')
+    };
+    if (!datos.pedidos.length) {
+      alert('No hay pedidos guardados en este navegador para exportar.');
+      return;
+    }
+    var texto = JSON.stringify(datos, null, 2);
+    var nombre = 'pedidos_iparra_' + new Date().toISOString().slice(0, 10) + '.json';
+    try {
+      var blob = new Blob([texto], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = nombre;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+      alert('Exportados ' + datos.pedidos.length + ' pedidos. Archivo: ' + nombre);
+    } catch (e) {
+      // Plan B: copiar al portapapeles para pegar en Pizza Calc
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(texto).then(function () {
+          alert('No se pudo descargar el archivo; los datos se copiaron al portapapeles.');
+        });
+      } else { prompt('Copiá este texto:', texto); }
+    }
+  });
+})();
+</script>
+
 </body>
 </html>
