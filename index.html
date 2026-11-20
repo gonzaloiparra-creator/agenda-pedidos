@@ -1680,16 +1680,29 @@ function GestionPedidos({ pedidos, actualizarPedido, onNuevoPedido, onAbrirPedid
         titulo="Pedidos"
         subtitulo={`${pedidos.length} en total`}
         accion={
-          <button
-            onClick={onAbrirVariedades}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              border: '1px solid var(--borde)', background: 'var(--superficie)', color: 'var(--terracota-d)',
-              borderRadius: 13, padding: '9px 12px', fontSize: 13, fontWeight: 700, flexShrink: 0,
-            }}
-          >
-            <Icon name="pizza" size={15} /> Variedades
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={() => window.exportarDatosIparra && window.exportarDatosIparra()}
+              title="Descargar pedidos, clientes y variedades (.json)"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                border: '1px solid var(--borde)', background: 'var(--superficie)', color: 'var(--terracota-d)',
+                borderRadius: 13, padding: '9px 12px', fontSize: 13, fontWeight: 700, flexShrink: 0,
+              }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg> Exportar
+            </button>
+            <button
+              onClick={onAbrirVariedades}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                border: '1px solid var(--borde)', background: 'var(--superficie)', color: 'var(--terracota-d)',
+                borderRadius: 13, padding: '9px 12px', fontSize: 13, fontWeight: 700, flexShrink: 0,
+              }}
+            >
+              <Icon name="pizza" size={15} /> Variedades
+            </button>
+          </div>
         }
       />
 
@@ -3943,48 +3956,41 @@ root.render(<App />);
 </script>
 
 
-<!-- ===== Exportar datos (backup / migración a Pizza Calc) ===== -->
-<button id="btn-exportar-datos" type="button" title="Descargar pedidos, clientes y variedades en un archivo .json"
-  style="position:fixed;left:12px;bottom:12px;z-index:99999;background:#1c1c21;color:#e8a020;border:1px solid rgba(232,160,32,.45);border-radius:10px;padding:8px 12px;font:600 12px system-ui,Arial,sans-serif;cursor:pointer;opacity:.9;box-shadow:0 4px 14px rgba(0,0,0,.5);">
-  ⬇ Exportar datos
-</button>
 <script>
-(function () {
+/* Exportar datos (backup / migración a Pizza Calc). Se invoca desde el botón "Exportar" de Pedidos. */
+window.exportarDatosIparra = function () {
   function leer(clave) {
     try { return JSON.parse(localStorage.getItem(clave) || '[]'); } catch (e) { return []; }
   }
-  document.getElementById('btn-exportar-datos').addEventListener('click', function () {
-    var datos = {
-      app: 'agenda-pedidos',
-      exportadoEn: new Date().toISOString(),
-      pedidos: leer('horno_pedidos_v1'),
-      clientes: leer('horno_clientes_v1'),
-      variedades: leer('horno_variedades_v1')
-    };
-    if (!datos.pedidos.length) {
-      alert('No hay pedidos guardados en este navegador para exportar.');
-      return;
-    }
-    var texto = JSON.stringify(datos, null, 2);
-    var nombre = 'pedidos_iparra_' + new Date().toISOString().slice(0, 10) + '.json';
-    try {
-      var blob = new Blob([texto], { type: 'application/json' });
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url; a.download = nombre;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
-      alert('Exportados ' + datos.pedidos.length + ' pedidos. Archivo: ' + nombre);
-    } catch (e) {
-      // Plan B: copiar al portapapeles para pegar en Pizza Calc
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(texto).then(function () {
-          alert('No se pudo descargar el archivo; los datos se copiaron al portapapeles.');
-        });
-      } else { prompt('Copiá este texto:', texto); }
-    }
-  });
-})();
+  var datos = {
+    app: 'agenda-pedidos',
+    exportadoEn: new Date().toISOString(),
+    pedidos: leer('horno_pedidos_v1'),
+    clientes: leer('horno_clientes_v1'),
+    variedades: leer('horno_variedades_v1')
+  };
+  if (!datos.pedidos.length) {
+    alert('No hay pedidos guardados en este navegador para exportar.');
+    return;
+  }
+  var texto = JSON.stringify(datos, null, 2);
+  var nombre = 'pedidos_iparra_' + new Date().toISOString().slice(0, 10) + '.json';
+  try {
+    var blob = new Blob([texto], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = nombre;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    alert('Exportados ' + datos.pedidos.length + ' pedidos. Archivo: ' + nombre);
+  } catch (e) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(texto).then(function () {
+        alert('No se pudo descargar el archivo; los datos se copiaron al portapapeles.');
+      });
+    } else { prompt('Copiá este texto:', texto); }
+  }
+};
 </script>
 
 </body>
